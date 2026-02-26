@@ -1,0 +1,104 @@
+menu "Project Configuration"
+
+    menu "WiFi Configuration"
+        config WIFI_SSID
+            string "WiFi SSID"
+            default ""
+            help
+              The SSID (network name) of the WiFi access point to connect to.
+
+        config WIFI_PASSWORD
+            string "WiFi Password"
+            default ""
+            help
+              The password for the WiFi network.
+              It is strongly recommended to change this from the default value
+              for security reasons.
+
+        config WIFI_MAX_RETRY
+            int "Maximum WiFi Connection Retries"
+            default 5
+            range 1 100
+            help
+              Maximum number of retries when attempting to connect to the WiFi network.
+              The connection attempt will be aborted after this many failures.
+
+    endmenu
+
+    menu "MQTT Configuration"
+
+        config MQTT_BROKER_URI
+            string "MQTT Broker URI"
+            default ""
+            help
+              The URI of the MQTT broker to connect to.
+              Supported schemes:
+                mqtt://   - Plain TCP (e.g. mqtt://192.168.1.1:1883)
+                mqtts://  - TLS encrypted  (e.g. mqtts://example.com:8883)
+                ws://     - WebSocket      (e.g. ws://example.com:8083/mqtt)
+                wss://    - WebSocket+TLS  (e.g. wss://example.com:8084/mqtt)
+
+        config MQTT_USERNAME
+            string "MQTT Username"
+            default ""
+            help
+              Username for MQTT broker authentication.
+              Leave empty if the broker does not require authentication.
+
+        config MQTT_PASSWORD
+            string "MQTT Password"
+            default ""
+            help
+              Password for MQTT broker authentication.
+              Leave empty if the broker does not require authentication.
+              It is strongly recommended to change this from the default value
+              for security reasons.
+
+        config MQTT_CLIENT_ID
+            string "MQTT Client ID"
+            default ""
+            help
+              Unique client identifier sent to the broker.
+              Leave empty to auto-generate an ID based on the chip MAC address
+              (recommended when deploying multiple devices).
+
+        config MQTT_KEEPALIVE
+            int "MQTT Keep-alive Interval (seconds)"
+            default 60
+            range 10 3600
+            help
+              Interval in seconds at which the client sends PING requests to the
+              broker to keep the connection alive. The broker will close the
+              connection if no message is received within 1.5x this period.
+
+    endmenu
+
+    menu "ESP-NOW Configuration"
+
+        config ESPNOW_PMK
+            string "ESP-NOW Primary Master Key (PMK)"
+            default ""
+            help
+              Primary Master Key for ESP-NOW encryption (16 characters).
+              Leave empty to disable encryption.
+              All nodes in the same ESP-NOW network should use the same PMK.
+
+        config ESPNOW_HEARTBEAT_TIMEOUT_S
+            int "Heartbeat Timeout (seconds)"
+            default 60
+            range 10 600
+            help
+              If no heartbeat is received from a node within this period,
+              the node will be marked as offline.
+
+        config ESPNOW_HEARTBEAT_CHECK_S
+            int "Heartbeat Check Interval (seconds)"
+            default 10
+            range 5 120
+            help
+              Interval at which the gateway scans the node table to detect
+              nodes that have exceeded the heartbeat timeout.
+
+    endmenu
+
+endmenu
