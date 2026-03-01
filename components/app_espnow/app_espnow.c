@@ -557,7 +557,7 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
  * Executes in WiFi Task Context, DO NOT perform blocking operations.
  * Dispatches to handlers based on protocol frame type.
  */
-static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
+static void app_espnow_recv_cb(const esp_now_recv_info_t *recv_info,
                             const uint8_t *data,
                             int data_len)
 {
@@ -594,7 +594,7 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
 /**
  * @brief ESP-NOW Send Callback
  */
-static void on_espnow_send(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)
+static void app_espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)
 {
     if (tx_info == NULL)
     {
@@ -747,14 +747,14 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
 
     /* ── Register Callbacks ── */
 
-    err = esp_now_register_recv_cb(on_espnow_recv);
+    err = esp_now_register_recv_cb(app_espnow_recv_cb);
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Register recv callback failed: %s", esp_err_to_name(err));
         goto cleanup_espnow;
     }
 
-    err = esp_now_register_send_cb(on_espnow_send);
+    err = esp_now_register_send_cb(app_espnow_send_cb);
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Register send callback failed: %s", esp_err_to_name(err));
