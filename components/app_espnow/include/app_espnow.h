@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include "esp_now.h"
+#include "app_protocol.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,7 +14,7 @@ extern "C" {
 /* ───────────────────────── Constants Definition ───────────────────────── */
 
 /** ESP-NOW Maximum Data Length (ESP-NOW protocol limit is 250 bytes) */
-#define APP_ESPNOW_DATA_MAX_LEN ESP_NOW_MAX_DATA_LEN
+#define APP_ESPNOW_DATA_MAX_LEN APP_PROTOCOL_DATA_MAX_LEN
 
 /** MAC Address Length */
 #define APP_ESPNOW_MAC_LEN 6
@@ -31,75 +32,7 @@ extern "C" {
 #define APP_ESPNOW_NODE_ID_MAX APP_ESPNOW_MAX_NODES
 
 /** Maximum User Data Payload Length (excluding protocol overhead) */
-#define APP_ESPNOW_USER_DATA_MAX_LEN 200
-
-/* ───────────────────────── Protocol Frame Definition ───────────────────────── */
-
-/**
- * @brief ESP-NOW Protocol Message Types
- *
- * Communication Protocol between Gateway and Node:
- *  1. Node broadcasts REGISTER_REQ after power up.
- *  2. Gateway assigns ID and replies with REGISTER_RESP.
- *  3. Node sends HEARTBEAT periodically, Gateway replies with HEARTBEAT_ACK.
- *  4. Node reports data using DATA_REPORT.
- */
-typedef enum {
-    APP_ESPNOW_MSG_REGISTER_REQ  = 0x01, /**< Node -> Gateway: Register Request */
-    APP_ESPNOW_MSG_REGISTER_RESP = 0x02, /**< Gateway -> Node: Register Response */
-    APP_ESPNOW_MSG_HEARTBEAT     = 0x03, /**< Node -> Gateway: Heartbeat */
-    APP_ESPNOW_MSG_HEARTBEAT_ACK = 0x04, /**< Gateway -> Node: Heartbeat Acknowledge */
-    APP_ESPNOW_MSG_DATA_REPORT   = 0x05, /**< Node -> Gateway: Data Report */
-} app_espnow_msg_type_t;
-
-/**
- * @brief Protocol Frame Header (Common for all messages)
- */
-typedef struct __attribute__((packed)) {
-    uint8_t  type;    /**< Message Type (app_espnow_msg_type_t) */
-    uint8_t  node_id; /**< Node ID (0 for Register Request) */
-    uint16_t seq;     /**< Sequence Number */
-} app_espnow_header_t;
-
-/**
- * @brief Register Request (Node -> Gateway)
- */
-typedef struct __attribute__((packed)) {
-    app_espnow_header_t header;
-    uint8_t             device_type; /**< Device Type Identifier (Defined by Node) */
-    uint8_t             fw_version;  /**< Firmware Version */
-} app_espnow_register_req_t;
-
-/**
- * @brief Register Response (Gateway -> Node)
- */
-typedef struct __attribute__((packed)) {
-    app_espnow_header_t header;
-    uint8_t             assigned_id; /**< Assigned Node ID, 0 means refused */
-} app_espnow_register_resp_t;
-
-/**
- * @brief Heartbeat (Node -> Gateway)
- */
-typedef struct __attribute__((packed)) {
-    app_espnow_header_t header;
-} app_espnow_heartbeat_t;
-
-/**
- * @brief Heartbeat Acknowledge (Gateway -> Node)
- */
-typedef struct __attribute__((packed)) {
-    app_espnow_header_t header;
-} app_espnow_heartbeat_ack_t;
-
-/**
- * @brief Data Report (Node -> Gateway)
- */
-typedef struct __attribute__((packed)) {
-    app_espnow_header_t header;
-    uint16_t            data_len;                            /**< User Data Length */
-    uint8_t             data[APP_ESPNOW_USER_DATA_MAX_LEN]; /**< User Data */
-} app_espnow_data_report_t;
+#define APP_ESPNOW_USER_DATA_MAX_LEN APP_PROTOCOL_USER_DATA_MAX_LEN
 
 /* ───────────────────────── Node Information ───────────────────────── */
 

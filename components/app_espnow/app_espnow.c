@@ -1,6 +1,7 @@
 #include "app_espnow.h"
 #include "app_event.h"
 #include "app_storage.h"
+#include "app_protocol.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -350,9 +351,9 @@ static void send_register_resp(const uint8_t *dst_mac, uint8_t assigned_id, uint
 {
     ensure_unicast_peer(dst_mac);
 
-    app_espnow_register_resp_t resp = {
+    app_protocol_register_resp_t resp = {
         .header = {
-            .type = APP_ESPNOW_MSG_REGISTER_RESP,
+            .type = APP_PROTOCOL_MSG_REGISTER_RESP,
             .node_id = 0,
             .seq = seq,
         },
@@ -379,9 +380,9 @@ static void send_heartbeat_ack(const uint8_t *dst_mac, uint8_t node_id, uint16_t
 {
     ensure_unicast_peer(dst_mac);
 
-    app_espnow_heartbeat_ack_t ack = {
+    app_protocol_heartbeat_ack_t ack = {
         .header = {
-            .type = APP_ESPNOW_MSG_HEARTBEAT_ACK,
+            .type = APP_PROTOCOL_MSG_HEARTBEAT_ACK,
             .node_id = node_id,
             .seq = seq,
         },
@@ -403,13 +404,13 @@ static void send_heartbeat_ack(const uint8_t *dst_mac, uint8_t node_id, uint16_t
 static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
                                  int data_len, int rssi)
 {
-    if (data_len < (int)sizeof(app_espnow_register_req_t))
+    if (data_len < (int)sizeof(app_protocol_register_req_t))
     {
         ESP_LOGW(TAG, "REGISTER_REQ too short (%d)", data_len);
         return;
     }
 
-    const app_espnow_register_req_t *req = (const app_espnow_register_req_t *)data;
+    const app_protocol_register_req_t *req = (const app_protocol_register_req_t *)data;
 
     ESP_LOGI(TAG, "REGISTER_REQ from " MACSTR " type=%u fw=%u",
              MAC2STR(src_mac), req->device_type, req->fw_version);
@@ -457,13 +458,13 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
 static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
                               int data_len, int rssi)
 {
-    if (data_len < (int)sizeof(app_espnow_heartbeat_t))
+    if (data_len < (int)sizeof(app_protocol_heartbeat_t))
     {
         ESP_LOGW(TAG, "HEARTBEAT too short (%d)", data_len);
         return;
     }
 
-    const app_espnow_heartbeat_t *hb = (const app_espnow_heartbeat_t *)data;
+    const app_protocol_heartbeat_t *hb = (const app_protocol_heartbeat_t *)data;
     uint8_t node_id = hb->header.node_id;
 
     ESP_LOGD(TAG, "HEARTBEAT from " MACSTR " node_id=%u", MAC2STR(src_mac), node_id);
@@ -496,22 +497,22 @@ static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
 static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
                                 int data_len, int rssi)
 {
-    if (data_len < (int)sizeof(app_espnow_header_t) + sizeof(uint16_t))
+    if (data_len < (int)sizeof(app_protocol_header_t) + sizeof(uint16_t))
     {
         ESP_LOGW(TAG, "DATA_REPORT too short (%d)", data_len);
         return;
     }
 
-    const app_espnow_data_report_t *report = (const app_espnow_data_report_t *)data;
+    const app_protocol_data_report_t *report = (const app_protocol_data_report_t *)data;
     uint8_t node_id = report->header.node_id;
 
-    if (report->data_len > APP_ESPNOW_USER_DATA_MAX_LEN)
+    if (report->data_len > APP_PROTOCOL_USER_DATA_MAX_LEN)
     {
         ESP_LOGW(TAG, "DATA_REPORT data_len too large (%u)", report->data_len);
         return;
     }
 
-    int expected_len = (int)(sizeof(app_espnow_header_t) + sizeof(uint16_t) + report->data_len);
+    int expected_len = (int)(sizeof(app_protocol_header_t) + sizeof(uint16_t) + report->data_len);
     if (data_len < expected_len)
     {
         ESP_LOGW(TAG, "DATA_REPORT truncated: got %d, expected %d", data_len, expected_len);
@@ -560,26 +561,26 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
                             const uint8_t *data,
                             int data_len)
 {
-    if (recv_info == NULL || data == NULL || data_len < (int)sizeof(app_espnow_header_t))
+    if (recv_info == NULL || data == NULL || data_len < (int)sizeof(app_protocol_header_t))
     {
         ESP_LOGW(TAG, "Invalid recv: data_len=%d", data_len);
         return;
     }
 
-    const app_espnow_header_t *header = (const app_espnow_header_t *)data;
+    const app_protocol_header_t *header = (const app_protocol_header_t *)data;
     int rssi = recv_info->rx_ctrl->rssi;
 
-    switch ((app_espnow_msg_type_t)header->type)
+    switch ((app_protocol_msg_type_t)header->type)
     {
-    case APP_ESPNOW_MSG_REGISTER_REQ:
+    case APP_PROTOCOL_MSG_REGISTER_REQ:
         handle_register_req(recv_info->src_addr, data, data_len, rssi);
         break;
 
-    case APP_ESPNOW_MSG_HEARTBEAT:
+    case APP_PROTOCOL_MSG_HEARTBEAT:
         handle_heartbeat(recv_info->src_addr, data, data_len, rssi);
         break;
 
-    case APP_ESPNOW_MSG_DATA_REPORT:
+    case APP_PROTOCOL_MSG_DATA_REPORT:
         handle_data_report(recv_info->src_addr, data, data_len, rssi);
         break;
 
@@ -1004,7 +1005,7 @@ esp_err_t app_espnow_send(const uint8_t *peer_addr, const uint8_t *data, uint16_
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (len == 0 || len > APP_ESPNOW_DATA_MAX_LEN)
+    if (len == 0 || len > APP_PROTOCOL_DATA_MAX_LEN)
     {
         ESP_LOGE(TAG, "send: invalid data length (%d)", len);
         return ESP_ERR_INVALID_ARG;
