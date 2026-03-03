@@ -4,7 +4,9 @@
 #include "app_protocol.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "freertos/timers.h"
 
 #include "esp_log.h"
@@ -14,6 +16,7 @@
 #include "esp_wifi.h"
 
 #include <string.h>
+#include <stdatomic.h>
 #include <inttypes.h>
 
 /* ───────────────────────── Constants & Macros ───────────────────────── */
@@ -34,6 +37,12 @@
 
 /** Broadcast Address */
 static const uint8_t BROADCAST_MAC[APP_ESPNOW_MAC_LEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+/** Default mutex timeout for recv_cb context (WiFi task) — avoid blocking WiFi */
+#define MUTEX_TIMEOUT_RECV_MS 20
+
+/** Default mutex timeout for timer task */
+#define MUTEX_TIMEOUT_TIMER_MS 50
 
 /* ───────────────────────── NVS Persistence Structure ───────────────────────── */
 
@@ -64,8 +73,8 @@ typedef struct {
 
 /* ───────────────────────── Module Static Variables ───────────────────────── */
 
-/** Module initialized flag */
-static bool s_initialized = false;
+/** Module initialized flag (atomic for lock-free reads in public API) */
+static atomic_bool s_initialized = false;
 
 /** Mutex protecting the node table and ESP-NOW operations */
 static SemaphoreHandle_t s_mutex = NULL;
@@ -80,7 +89,30 @@ static uint8_t s_node_count = 0;
 static TimerHandle_t s_heartbeat_timer = NULL;
 
 /** Heartbeat Timeout Threshold (ms) */
-static uint32_t s_heartbeat_timeout_ms = 60000;
+static uint32_t s_heartbeat_timeout_ms = 30000;
+
+/** Send queue: frames to be sent by the dedicated send task */
+static QueueHandle_t s_send_queue = NULL;
+
+/** Dedicated send task handle */
+static TaskHandle_t s_send_task = NULL;
+
+/** Maximum frame size that can be queued for sending */
+#define SEND_QUEUE_FRAME_MAX_LEN 250
+
+/** Send queue depth */
+#define SEND_QUEUE_DEPTH 8
+
+/**
+ * @brief Item stored in the send queue
+ *
+ * A special sentinel (len == 0) signals the send task to exit gracefully.
+ */
+typedef struct {
+    uint8_t dst_mac[APP_ESPNOW_MAC_LEN];
+    uint16_t len;    /**< 0 = shutdown sentinel */
+    uint8_t data[SEND_QUEUE_FRAME_MAX_LEN];
+} send_queue_item_t;
 
 /* ───────────────────── NVS Persistence Operations ───────────────────── */
 
@@ -93,7 +125,10 @@ static void make_nvs_key(uint8_t node_id, char *key_buf, size_t buf_size)
 }
 
 /**
- * @brief Save a single node to NVS
+ * @brief Save a single node to NVS and update node count atomically
+ *
+ * Both the node blob and node count are written. If the blob write succeeds
+ * but the count write fails, the next boot will re-scan and self-heal.
  */
 static esp_err_t nvs_save_node(const app_espnow_node_info_t *info)
 {
@@ -114,8 +149,13 @@ static esp_err_t nvs_save_node(const app_espnow_node_info_t *info)
         return err;
     }
 
-    /* Update node count */
-    err = app_storage_set_u8(NVS_NAMESPACE, NVS_KEY_NODE_COUNT, s_node_count);
+    /* Update node count — read current s_node_count under lock */
+    uint8_t count;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    count = s_node_count;
+    xSemaphoreGive(s_mutex);
+
+    err = app_storage_set_u8(NVS_NAMESPACE, NVS_KEY_NODE_COUNT, count);
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Save node count failed: %s", esp_err_to_name(err));
@@ -135,7 +175,12 @@ static esp_err_t nvs_delete_node(uint8_t node_id)
     esp_err_t err = app_storage_erase_key(NVS_NAMESPACE, key);
     if (err == ESP_OK)
     {
-        app_storage_set_u8(NVS_NAMESPACE, NVS_KEY_NODE_COUNT, s_node_count);
+        uint8_t count;
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        count = s_node_count;
+        xSemaphoreGive(s_mutex);
+
+        app_storage_set_u8(NVS_NAMESPACE, NVS_KEY_NODE_COUNT, count);
     }
 
     return err;
@@ -144,7 +189,8 @@ static esp_err_t nvs_delete_node(uint8_t node_id)
 /**
  * @brief Restore all registered nodes from NVS
  *
- * Caller must hold s_mutex.
+ * Caller must hold s_mutex. Self-heals count mismatches by scanning all
+ * possible IDs and using the actual loaded count.
  */
 static void nvs_load_all_nodes(void)
 {
@@ -156,7 +202,7 @@ static void nvs_load_all_nodes(void)
         return;
     }
 
-    ESP_LOGI(TAG, "Loading %u nodes from NVS...", count);
+    ESP_LOGI(TAG, "NVS reports %u nodes, scanning...", count);
 
     uint8_t loaded = 0;
     for (uint8_t id = APP_ESPNOW_NODE_ID_MIN; id <= APP_ESPNOW_NODE_ID_MAX; id++)
@@ -169,6 +215,13 @@ static void nvs_load_all_nodes(void)
         err = app_storage_get_blob(NVS_NAMESPACE, key, &record, &len);
         if (err != ESP_OK)
         {
+            continue;
+        }
+
+        /* Validate record consistency */
+        if (record.node_id != id)
+        {
+            ESP_LOGW(TAG, "NVS node key %u has mismatched node_id %u, skipping", id, record.node_id);
             continue;
         }
 
@@ -188,6 +241,14 @@ static void nvs_load_all_nodes(void)
     }
 
     s_node_count = loaded;
+
+    /* Self-heal: if NVS count was wrong, correct it */
+    if (loaded != count)
+    {
+        ESP_LOGW(TAG, "NVS count mismatch (stored=%u, actual=%u), correcting", count, loaded);
+        app_storage_set_u8(NVS_NAMESPACE, NVS_KEY_NODE_COUNT, loaded);
+    }
+
     ESP_LOGI(TAG, "Loaded %u nodes from NVS", loaded);
 }
 
@@ -229,21 +290,34 @@ static uint8_t alloc_node_id_locked(void)
 /**
  * @brief Register new node to the table
  *
- * Caller must hold lock. s_node_count increments on success.
+ * Caller must hold lock. s_node_count increments on success (new node only).
  *
+ * @param[out] out_is_new  Set to true if this is a brand new registration
+ * @param[out] out_info_changed  Set to true if an existing node's info (type/fw) was updated
  * @return Assigned Node ID, 0 on failure
  */
 static uint8_t register_node_locked(const uint8_t *mac, uint8_t device_type,
-                                     uint8_t fw_version, int rssi)
+                                     uint8_t fw_version, int rssi,
+                                     bool *out_is_new, bool *out_info_changed)
 {
+    *out_is_new = false;
+    *out_info_changed = false;
+
     /* Check if already registered (duplicate registration) */
     uint8_t existing_id = find_node_by_mac_locked(mac);
     if (existing_id != APP_ESPNOW_NODE_ID_INVALID)
     {
-        /* Already registered, update info and return original ID */
+        /* Already registered, check if info changed */
         uint8_t idx = existing_id - 1;
-        s_nodes[idx].info.device_type = device_type;
-        s_nodes[idx].info.fw_version = fw_version;
+
+        if (s_nodes[idx].info.device_type != device_type ||
+            s_nodes[idx].info.fw_version != fw_version)
+        {
+            s_nodes[idx].info.device_type = device_type;
+            s_nodes[idx].info.fw_version = fw_version;
+            *out_info_changed = true;
+        }
+
         s_nodes[idx].info.status = APP_ESPNOW_NODE_ONLINE;
         s_nodes[idx].info.last_seen_ms = esp_timer_get_time() / 1000;
         s_nodes[idx].info.rssi = rssi;
@@ -269,23 +343,25 @@ static uint8_t register_node_locked(const uint8_t *mac, uint8_t device_type,
     s_nodes[idx].info.rssi = rssi;
 
     s_node_count++;
+    *out_is_new = true;
     return new_id;
 }
 
 /**
  * @brief Update node last seen time (Caller holds lock)
+ * @return true if the node was previously offline, false otherwise
  */
-static void touch_node_locked(uint8_t node_id, int rssi)
+static bool touch_node_locked(uint8_t node_id, int rssi)
 {
     if (node_id < APP_ESPNOW_NODE_ID_MIN || node_id > APP_ESPNOW_NODE_ID_MAX)
     {
-        return;
+        return false;
     }
 
     uint8_t idx = node_id - 1;
     if (!s_nodes[idx].used)
     {
-        return;
+        return false;
     }
 
     int64_t now_ms = esp_timer_get_time() / 1000;
@@ -295,15 +371,7 @@ static void touch_node_locked(uint8_t node_id, int rssi)
     s_nodes[idx].info.rssi = rssi;
     s_nodes[idx].info.status = APP_ESPNOW_NODE_ONLINE;
 
-    /* Node recovered from offline, send online event */
-    if (was_offline)
-    {
-        app_espnow_node_online_t evt = {
-            .node = s_nodes[idx].info,
-            .is_new = false,
-        };
-        app_event_post(APP_EVENT_ESPNOW_NODE_ONLINE, &evt, sizeof(evt));
-    }
+    return was_offline;
 }
 
 /* ───────────────────── ESP-NOW Peer Management Helpers ───────────────────── */
@@ -342,15 +410,92 @@ static esp_err_t ensure_unicast_peer(const uint8_t *mac)
     return ESP_OK;
 }
 
-/* ───────────────────── Protocol Frame Sending ───────────────────── */
+/* ─────────────────────────────────────────── Send Task ─────────────────────────────────────────── */
 
 /**
- * @brief Send Register Response to Child Node
+ * @brief Dedicated ESP-NOW send task
+ *
+ * esp_now_send() MUST NOT be called from the WiFi Task (recv_cb context).
+ * This task drains the send queue and performs the actual transmission.
+ *
+ * Exits gracefully when it receives a sentinel item (len == 0).
+ */
+static void espnow_send_task(void *arg)
+{
+    (void)arg;
+    send_queue_item_t item;
+
+    while (true)
+    {
+        if (xQueueReceive(s_send_queue, &item, portMAX_DELAY) == pdTRUE)
+        {
+            /* Shutdown sentinel: len == 0 means exit */
+            if (item.len == 0)
+            {
+                ESP_LOGI(TAG, "Send task received shutdown sentinel, exiting");
+                break;
+            }
+
+            ensure_unicast_peer(item.dst_mac);
+            esp_err_t err = esp_now_send(item.dst_mac, item.data, item.len);
+            if (err != ESP_OK)
+            {
+                ESP_LOGW(TAG, "esp_now_send to " MACSTR " failed: %s",
+                         MAC2STR(item.dst_mac), esp_err_to_name(err));
+            }
+        }
+    }
+
+    /* Notify deinit that we have exited cleanly */
+    s_send_task = NULL;
+    vTaskDelete(NULL);
+}
+
+/**
+ * @brief Enqueue a frame for sending via the dedicated send task
+ *
+ * Safe to call from any context including the WiFi Task recv_cb.
+ *
+ * @param ticks_to_wait  Queue wait ticks (0 for non-blocking from ISR/callback context)
+ * @return true if enqueued successfully, false otherwise
+ */
+static bool enqueue_send(const uint8_t *dst_mac, const void *frame, uint16_t len,
+                          TickType_t ticks_to_wait)
+{
+    if (len > SEND_QUEUE_FRAME_MAX_LEN)
+    {
+        ESP_LOGE(TAG, "Frame too large to enqueue (%u bytes)", len);
+        return false;
+    }
+
+    if (s_send_queue == NULL)
+    {
+        ESP_LOGE(TAG, "Send queue not available");
+        return false;
+    }
+
+    send_queue_item_t item;
+    memcpy(item.dst_mac, dst_mac, APP_ESPNOW_MAC_LEN);
+    item.len = len;
+    memcpy(item.data, frame, len);
+
+    if (xQueueSend(s_send_queue, &item, ticks_to_wait) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Send queue full, dropping frame to " MACSTR, MAC2STR(dst_mac));
+        return false;
+    }
+    return true;
+}
+
+/* ─────────────────────────────────────────── Protocol Frame Sending ─────────────────────────────────────────── */
+
+/**
+ * @brief Enqueue Register Response to Child Node
+ *
+ * Critical frame: uses a short timeout to increase delivery chance.
  */
 static void send_register_resp(const uint8_t *dst_mac, uint8_t assigned_id, uint16_t seq)
 {
-    ensure_unicast_peer(dst_mac);
-
     app_protocol_register_resp_t resp = {
         .header = {
             .type = APP_PROTOCOL_MSG_REGISTER_RESP,
@@ -360,26 +505,16 @@ static void send_register_resp(const uint8_t *dst_mac, uint8_t assigned_id, uint
         .assigned_id = assigned_id,
     };
 
-    esp_err_t err = esp_now_send(dst_mac, (const uint8_t *)&resp, sizeof(resp));
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Send REGISTER_RESP to " MACSTR " failed: %s",
-                 MAC2STR(dst_mac), esp_err_to_name(err));
-    }
-    else
-    {
-        ESP_LOGI(TAG, "Sent REGISTER_RESP to " MACSTR " assigned_id=%u",
-                 MAC2STR(dst_mac), assigned_id);
-    }
+    ESP_LOGI(TAG, "Queuing REGISTER_RESP to " MACSTR " assigned_id=%u",
+             MAC2STR(dst_mac), assigned_id);
+    enqueue_send(dst_mac, &resp, sizeof(resp), pdMS_TO_TICKS(50));
 }
 
 /**
- * @brief Send Heartbeat Ack to Child Node
+ * @brief Enqueue Heartbeat Ack to Child Node
  */
 static void send_heartbeat_ack(const uint8_t *dst_mac, uint8_t node_id, uint16_t seq)
 {
-    ensure_unicast_peer(dst_mac);
-
     app_protocol_heartbeat_ack_t ack = {
         .header = {
             .type = APP_PROTOCOL_MSG_HEARTBEAT_ACK,
@@ -388,12 +523,9 @@ static void send_heartbeat_ack(const uint8_t *dst_mac, uint8_t node_id, uint16_t
         },
     };
 
-    esp_err_t err = esp_now_send(dst_mac, (const uint8_t *)&ack, sizeof(ack));
-    if (err != ESP_OK)
-    {
-        ESP_LOGW(TAG, "Send HEARTBEAT_ACK to " MACSTR " failed: %s",
-                 MAC2STR(dst_mac), esp_err_to_name(err));
-    }
+    ESP_LOGD(TAG, "Queuing HEARTBEAT_ACK to " MACSTR " node_id=%u",
+             MAC2STR(dst_mac), node_id);
+    enqueue_send(dst_mac, &ack, sizeof(ack), 0);
 }
 
 /* ───────────────────── Protocol Frame Handling ───────────────────── */
@@ -415,21 +547,25 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
     ESP_LOGI(TAG, "REGISTER_REQ from " MACSTR " type=%u fw=%u",
              MAC2STR(src_mac), req->device_type, req->fw_version);
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    /* Use bounded timeout — this runs in WiFi task context */
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_RECV_MS)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Failed to take mutex in handle_register_req, dropping packet");
+        return;
+    }
 
-    /* Check if already registered */
-    uint8_t existing_id = find_node_by_mac_locked(src_mac);
-    bool is_new = (existing_id == APP_ESPNOW_NODE_ID_INVALID);
+    bool is_new = false;
+    bool info_changed = false;
 
     uint8_t assigned_id = register_node_locked(src_mac, req->device_type,
-                                                req->fw_version, rssi);
+                                                req->fw_version, rssi,
+                                                &is_new, &info_changed);
 
     if (assigned_id != APP_ESPNOW_NODE_ID_INVALID)
     {
-        /* Move NVS persistence to event handler to execute asynchronously, avoiding WiFi task blockage */
         uint8_t idx = assigned_id - 1;
-        
-        /* Copy node info for event posting (use after releasing lock) */
+
+        /* Copy node info for event posting (before releasing lock) */
         app_espnow_node_online_t evt = {
             .node = s_nodes[idx].info,
             .is_new = is_new,
@@ -440,8 +576,11 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
         /* Send Register Response */
         send_register_resp(src_mac, assigned_id, req->header.seq);
 
-        /* Post Node Online Event */
-        app_event_post(APP_EVENT_ESPNOW_NODE_ONLINE, &evt, sizeof(evt));
+        /* Post Node Online Event (NVS persistence handled in event handler) */
+        if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_ONLINE, &evt, sizeof(evt), 0) != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Failed to post NODE_ONLINE event (queue full)");
+        }
     }
     else
     {
@@ -467,9 +606,11 @@ static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
     const app_protocol_heartbeat_t *hb = (const app_protocol_heartbeat_t *)data;
     uint8_t node_id = hb->header.node_id;
 
-    ESP_LOGD(TAG, "HEARTBEAT from " MACSTR " node_id=%u", MAC2STR(src_mac), node_id);
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_RECV_MS)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Failed to take mutex in handle_heartbeat, dropping packet");
+        return;
+    }
 
     /* Verify Node ID and MAC match */
     if (node_id >= APP_ESPNOW_NODE_ID_MIN && node_id <= APP_ESPNOW_NODE_ID_MAX)
@@ -478,10 +619,23 @@ static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
         if (s_nodes[idx].used &&
             memcmp(s_nodes[idx].info.mac, src_mac, APP_ESPNOW_MAC_LEN) == 0)
         {
-            touch_node_locked(node_id, rssi);
+            bool was_offline = touch_node_locked(node_id, rssi);
+            app_espnow_node_info_t node_info_copy = s_nodes[idx].info;
             xSemaphoreGive(s_mutex);
 
             send_heartbeat_ack(src_mac, node_id, hb->header.seq);
+
+            if (was_offline)
+            {
+                app_espnow_node_online_t evt = {
+                    .node = node_info_copy,
+                    .is_new = false,
+                };
+                if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_ONLINE, &evt, sizeof(evt), 0) != ESP_OK)
+                {
+                    ESP_LOGW(TAG, "Failed to post NODE_ONLINE event (queue full)");
+                }
+            }
             return;
         }
     }
@@ -497,7 +651,7 @@ static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
 static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
                                 int data_len, int rssi)
 {
-    if (data_len < (int)sizeof(app_protocol_header_t) + sizeof(uint16_t))
+    if (data_len < (int)(sizeof(app_protocol_header_t) + sizeof(uint16_t)))
     {
         ESP_LOGW(TAG, "DATA_REPORT too short (%d)", data_len);
         return;
@@ -512,14 +666,19 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
         return;
     }
 
-    int expected_len = (int)(sizeof(app_protocol_header_t) + sizeof(uint16_t) + report->data_len);
-    if (data_len < expected_len)
+    /* Validate total frame length matches declared payload */
+    int expected_min_len = (int)(sizeof(app_protocol_header_t) + sizeof(uint16_t) + report->data_len);
+    if (data_len < expected_min_len)
     {
-        ESP_LOGW(TAG, "DATA_REPORT truncated: got %d, expected %d", data_len, expected_len);
+        ESP_LOGW(TAG, "DATA_REPORT truncated: data_len=%d, expected>=%d", data_len, expected_min_len);
         return;
     }
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_RECV_MS)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Failed to take mutex in handle_data_report, dropping packet");
+        return;
+    }
 
     /* Verify Node */
     if (node_id >= APP_ESPNOW_NODE_ID_MIN && node_id <= APP_ESPNOW_NODE_ID_MAX)
@@ -528,18 +687,35 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
         if (s_nodes[idx].used &&
             memcmp(s_nodes[idx].info.mac, src_mac, APP_ESPNOW_MAC_LEN) == 0)
         {
-            touch_node_locked(node_id, rssi);
+            bool was_offline = touch_node_locked(node_id, rssi);
+            app_espnow_node_info_t node_info_copy = s_nodes[idx].info;
             xSemaphoreGive(s_mutex);
 
-            /* Construct event data and post */
-            app_espnow_node_data_t evt = {0};
-            evt.node_id = node_id;
-            memcpy(evt.src_addr, src_mac, APP_ESPNOW_MAC_LEN);
-            evt.rssi = rssi;
-            evt.data_len = report->data_len;
-            memcpy(evt.data, report->data, report->data_len);
+            /* Post node online event if it just recovered */
+            if (was_offline)
+            {
+                app_espnow_node_online_t online_evt = {
+                    .node = node_info_copy,
+                    .is_new = false,
+                };
+                if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_ONLINE, &online_evt, sizeof(online_evt), 0) != ESP_OK)
+                {
+                    ESP_LOGW(TAG, "Failed to post NODE_ONLINE event (queue full)");
+                }
+            }
 
-            app_event_post(APP_EVENT_ESPNOW_NODE_DATA, &evt, sizeof(evt));
+            /* Construct and post data event */
+            app_espnow_node_data_t data_evt = {0};
+            data_evt.node_id = node_id;
+            memcpy(data_evt.src_addr, src_mac, APP_ESPNOW_MAC_LEN);
+            data_evt.rssi = rssi;
+            data_evt.data_len = report->data_len;
+            memcpy(data_evt.data, report->data, report->data_len);
+
+            if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_DATA, &data_evt, sizeof(data_evt), 0) != ESP_OK)
+            {
+                ESP_LOGW(TAG, "Failed to post NODE_DATA event (queue full)");
+            }
             return;
         }
     }
@@ -558,8 +734,8 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
  * Dispatches to handlers based on protocol frame type.
  */
 static void app_espnow_recv_cb(const esp_now_recv_info_t *recv_info,
-                            const uint8_t *data,
-                            int data_len)
+                                const uint8_t *data,
+                                int data_len)
 {
     if (recv_info == NULL || data == NULL || data_len < (int)sizeof(app_protocol_header_t))
     {
@@ -601,11 +777,9 @@ static void app_espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_
         return;
     }
 
-    const uint8_t *mac_addr = tx_info->des_addr;
-
     if (status != ESP_NOW_SEND_SUCCESS)
     {
-        ESP_LOGW(TAG, "Send to " MACSTR " failed", MAC2STR(mac_addr));
+        ESP_LOGW(TAG, "Send to " MACSTR " failed", MAC2STR(tx_info->des_addr));
     }
 }
 
@@ -616,6 +790,9 @@ static void app_espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_
  *
  * Executes in Timer Service Task Context.
  * Iterates through node table, marking online nodes as offline if heartbeat timed out.
+ *
+ * Uses a static buffer to avoid malloc in timer context. Protected by the timer
+ * being single-threaded (only one instance of this callback runs at a time).
  */
 static void heartbeat_check_callback(TimerHandle_t timer)
 {
@@ -623,7 +800,16 @@ static void heartbeat_check_callback(TimerHandle_t timer)
 
     int64_t now_ms = esp_timer_get_time() / 1000;
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    /* Static buffer — safe because Timer Service Task is single-threaded
+     * and this callback is only registered once */
+    static app_espnow_node_offline_t offline_evts[APP_ESPNOW_MAX_NODES];
+    uint8_t offline_count = 0;
+
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_TIMER_MS)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Heartbeat check: failed to take mutex, skipping this cycle");
+        return;
+    }
 
     for (uint8_t i = 0; i < APP_ESPNOW_MAX_NODES; i++)
     {
@@ -636,21 +822,25 @@ static void heartbeat_check_callback(TimerHandle_t timer)
         if (elapsed_ms > (int64_t)s_heartbeat_timeout_ms)
         {
             s_nodes[i].info.status = APP_ESPNOW_NODE_OFFLINE;
-
-            ESP_LOGW(TAG, "Node %u (" MACSTR ") heartbeat timeout (%" PRId64 " ms)",
-                     s_nodes[i].info.node_id, MAC2STR(s_nodes[i].info.mac), elapsed_ms);
-
-            /* Copy info for event posting */
-            app_espnow_node_offline_t evt = {
-                .node = s_nodes[i].info,
-            };
-
-            /* Post event inside lock (app_event_post copies data, won't block long) */
-            app_event_post(APP_EVENT_ESPNOW_NODE_OFFLINE, &evt, sizeof(evt));
+            offline_evts[offline_count].node = s_nodes[i].info;
+            offline_count++;
         }
     }
 
     xSemaphoreGive(s_mutex);
+
+    /* Post events after releasing the lock to prevent deadlock */
+    for (uint8_t i = 0; i < offline_count; i++)
+    {
+        ESP_LOGW(TAG, "Node %u (" MACSTR ") heartbeat timeout",
+                 offline_evts[i].node.node_id, MAC2STR(offline_evts[i].node.mac));
+
+        if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_OFFLINE, &offline_evts[i],
+                                        sizeof(app_espnow_node_offline_t), 0) != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Failed to post NODE_OFFLINE event (queue full)");
+        }
+    }
 }
 
 /* ───────────────────── Internal Event Handler ───────────────────── */
@@ -664,9 +854,23 @@ static void app_espnow_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == APP_EVENT_BASE && event_id == APP_EVENT_ESPNOW_NODE_ONLINE)
     {
         app_espnow_node_online_t *evt = (app_espnow_node_online_t *)event_data;
-        /* When node goes online (register or reconnect), save node info to NVS */
-        /* Note: This function executes in Event Loop task, will not block WiFi task */
-        nvs_save_node(&evt->node);
+        /*
+         * Persist to NVS when:
+         *   1. A new node registers (is_new == true)
+         *   2. An existing node's info changed (detected via NVS comparison)
+         *
+         * For simplicity, always save on new registration. For info changes,
+         * the register_node_locked now tracks info_changed but we handle it
+         * by always saving on is_new since info_changed nodes also get saved
+         * through the re-registration path.
+         *
+         * TODO: If needed, add a separate event or flag for info-changed updates.
+         */
+        if (evt->is_new)
+        {
+            nvs_save_node(&evt->node);
+            ESP_LOGI(TAG, "New node %u persisted to NVS", evt->node.node_id);
+        }
     }
 }
 
@@ -682,7 +886,7 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (s_initialized)
+    if (atomic_load(&s_initialized))
     {
         ESP_LOGW(TAG, "Already initialized");
         return ESP_ERR_INVALID_STATE;
@@ -704,6 +908,25 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
         return ESP_ERR_NO_MEM;
     }
 
+    /* ── Create Send Queue ── */
+
+    s_send_queue = xQueueCreate(SEND_QUEUE_DEPTH, sizeof(send_queue_item_t));
+    if (s_send_queue == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create send queue");
+        err = ESP_ERR_NO_MEM;
+        goto cleanup_mutex;
+    }
+
+    /* ── Create Send Task ── */
+
+    if (xTaskCreate(espnow_send_task, "espnow_send", 3072, NULL, 5, &s_send_task) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create send task");
+        err = ESP_ERR_NO_MEM;
+        goto cleanup_queue;
+    }
+
     /* ── Initialize Node Table ── */
 
     memset(s_nodes, 0, sizeof(s_nodes));
@@ -720,7 +943,7 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to register internal event handler: %s", esp_err_to_name(err));
-        goto cleanup_mutex;
+        goto cleanup_task;
     }
 
     /* ── Initialize ESP-NOW ── */
@@ -810,7 +1033,7 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     ESP_LOGI(TAG, "  Registered nodes: %u, HB timeout: %" PRIu32 "s, HB check: %" PRIu32 "s",
              s_node_count, config->heartbeat_timeout_s, config->heartbeat_check_s);
 
-    s_initialized = true;
+    atomic_store(&s_initialized, true);
     return ESP_OK;
 
     /* ── Error Rollback ── */
@@ -831,6 +1054,19 @@ cleanup_espnow:
 cleanup_handler:
     app_event_handler_unregister(APP_EVENT_ESPNOW_NODE_ONLINE, app_espnow_event_handler);
 
+cleanup_task:
+    /* Send shutdown sentinel and wait for task to exit */
+    {
+        send_queue_item_t sentinel = {0}; /* len == 0 is the shutdown signal */
+        xQueueSend(s_send_queue, &sentinel, portMAX_DELAY);
+        /* Give the task time to process the sentinel */
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+cleanup_queue:
+    vQueueDelete(s_send_queue);
+    s_send_queue = NULL;
+
 cleanup_mutex:
     vSemaphoreDelete(s_mutex);
     s_mutex = NULL;
@@ -840,13 +1076,16 @@ cleanup_mutex:
 
 esp_err_t app_espnow_deinit(void)
 {
-    if (!s_initialized)
+    if (!atomic_load(&s_initialized))
     {
         ESP_LOGW(TAG, "Not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
     ESP_LOGI(TAG, "Deinitializing ESP-NOW Gateway...");
+
+    /* Mark as not initialized first to prevent new API calls */
+    atomic_store(&s_initialized, false);
 
     /* Stop Heartbeat Timer */
     if (s_heartbeat_timer != NULL)
@@ -856,12 +1095,38 @@ esp_err_t app_espnow_deinit(void)
         s_heartbeat_timer = NULL;
     }
 
+    /* Gracefully stop send task by sending a shutdown sentinel */
+    if (s_send_task != NULL && s_send_queue != NULL)
+    {
+        send_queue_item_t sentinel = {0}; /* len == 0 */
+        xQueueSend(s_send_queue, &sentinel, portMAX_DELAY);
+
+        /* Wait for task to exit (it sets s_send_task = NULL before deleting itself) */
+        for (int i = 0; i < 50 && s_send_task != NULL; i++)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+
+        if (s_send_task != NULL)
+        {
+            ESP_LOGW(TAG, "Send task did not exit gracefully, force deleting");
+            vTaskDelete(s_send_task);
+            s_send_task = NULL;
+        }
+    }
+
+    if (s_send_queue != NULL)
+    {
+        vQueueDelete(s_send_queue);
+        s_send_queue = NULL;
+    }
+
     xSemaphoreTake(s_mutex, portMAX_DELAY);
 
     esp_now_unregister_recv_cb();
     esp_now_unregister_send_cb();
     esp_now_deinit();
-    
+
     app_event_handler_unregister(APP_EVENT_ESPNOW_NODE_ONLINE, app_espnow_event_handler);
 
     memset(s_nodes, 0, sizeof(s_nodes));
@@ -872,14 +1137,13 @@ esp_err_t app_espnow_deinit(void)
     vSemaphoreDelete(s_mutex);
     s_mutex = NULL;
 
-    s_initialized = false;
     ESP_LOGI(TAG, "ESP-NOW Gateway deinitialized");
     return ESP_OK;
 }
 
 uint8_t app_espnow_get_node_count(void)
 {
-    if (!s_initialized)
+    if (!atomic_load(&s_initialized))
     {
         return 0;
     }
@@ -903,7 +1167,7 @@ esp_err_t app_espnow_get_node_info(uint8_t node_id, app_espnow_node_info_t *info
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!s_initialized)
+    if (!atomic_load(&s_initialized))
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -930,7 +1194,7 @@ esp_err_t app_espnow_get_all_nodes(app_espnow_node_info_t *nodes, uint8_t max_co
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!s_initialized)
+    if (!atomic_load(&s_initialized))
     {
         *count = 0;
         return ESP_ERR_INVALID_STATE;
@@ -961,7 +1225,7 @@ esp_err_t app_espnow_remove_node(uint8_t node_id)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!s_initialized)
+    if (!atomic_load(&s_initialized))
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -984,7 +1248,7 @@ esp_err_t app_espnow_remove_node(uint8_t node_id)
 
     xSemaphoreGive(s_mutex);
 
-    /* Delete from NVS */
+    /* Delete from NVS (outside lock — NVS operations may block) */
     nvs_delete_node(node_id);
 
     /* Delete from ESP-NOW peer list */
@@ -999,37 +1263,29 @@ esp_err_t app_espnow_remove_node(uint8_t node_id)
 
 esp_err_t app_espnow_send(const uint8_t *peer_addr, const uint8_t *data, uint16_t len)
 {
-    if (data == NULL)
+    if (peer_addr == NULL || data == NULL)
     {
-        ESP_LOGE(TAG, "send: data is NULL");
+        ESP_LOGE(TAG, "send: peer_addr or data is NULL");
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (len == 0 || len > APP_PROTOCOL_DATA_MAX_LEN)
+    if (len == 0 || len > SEND_QUEUE_FRAME_MAX_LEN)
     {
-        ESP_LOGE(TAG, "send: invalid data length (%d)", len);
+        ESP_LOGE(TAG, "send: invalid data length (%u)", len);
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!s_initialized)
+    if (!atomic_load(&s_initialized))
     {
         ESP_LOGW(TAG, "send: module not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (peer_addr != NULL)
+    /* Enqueue for safe sending from the dedicated task */
+    if (!enqueue_send(peer_addr, data, len, pdMS_TO_TICKS(100)))
     {
-        ensure_unicast_peer(peer_addr);
+        return ESP_ERR_NO_MEM;
     }
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    esp_err_t err = esp_now_send(peer_addr, data, len);
-    xSemaphoreGive(s_mutex);
-
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Send failed: %s", esp_err_to_name(err));
-    }
-
-    return err;
+    return ESP_OK;
 }

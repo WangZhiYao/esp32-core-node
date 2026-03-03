@@ -50,6 +50,16 @@ esp_err_t app_event_init(void);
 esp_err_t app_event_post(app_event_id_t event_id, void *event_data, size_t event_data_size);
 
 /**
+ * @brief Post an event to the custom event loop with timeout
+ * @param event_id        Event ID
+ * @param event_data      Pointer to event data (can be NULL), data is copied internally
+ * @param event_data_size Size of event data (bytes)
+ * @param timeout         Timeout to wait for the event queue to be available
+ * @return ESP_OK on success, ESP_ERR_TIMEOUT if queue is full, ESP_ERR_INVALID_STATE if event loop is not initialized
+ */
+esp_err_t app_event_post_with_timeout(app_event_id_t event_id, void *event_data, size_t event_data_size, TickType_t timeout);
+
+/**
  * @brief Register an event handler to the specified event loop (for APP_EVENT_BASE)
  *
  * This function is a wrapper for esp_event_handler_register_with, fixing APP_EVENT_BASE as the event base.

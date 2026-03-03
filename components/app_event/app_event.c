@@ -17,7 +17,7 @@ esp_err_t app_event_init(void)
     }
 
     esp_event_loop_args_t event_loop_args = {
-        .queue_size = 10, /* Event queue depth, adjust as needed */
+        .queue_size = 32, /* Event queue depth, adjust as needed */
         .task_name = "app_event_task",
         .task_priority = 5,
         .task_stack_size = 4096,       /* Appropriately increased stack size to prevent overflow */
@@ -32,7 +32,7 @@ esp_err_t app_event_init(void)
     return err;
 }
 
-esp_err_t app_event_post(app_event_id_t event_id, void *event_data, size_t event_data_size)
+esp_err_t app_event_post_with_timeout(app_event_id_t event_id, void *event_data, size_t event_data_size, TickType_t timeout)
 {
     /* Check if event loop is initialized */
     if (s_app_event_loop_handle == NULL)
@@ -47,7 +47,12 @@ esp_err_t app_event_post(app_event_id_t event_id, void *event_data, size_t event
         (int32_t)event_id,
         event_data,
         event_data_size,
-        portMAX_DELAY);
+        timeout);
+}
+
+esp_err_t app_event_post(app_event_id_t event_id, void *event_data, size_t event_data_size)
+{
+    return app_event_post_with_timeout(event_id, event_data, event_data_size, portMAX_DELAY);
 }
 
 esp_err_t app_event_handler_register(int32_t event_id, esp_event_handler_t event_handler, void *event_handler_arg)
