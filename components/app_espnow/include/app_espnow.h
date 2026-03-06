@@ -181,7 +181,7 @@ esp_err_t app_espnow_remove_node(uint8_t node_id);
  *
  * Thread-safe.
  *
- * @param[in] peer_addr Target MAC address (6 bytes), NULL for broadcast
+ * @param[in] peer_addr Target MAC address (6 bytes), cannot be NULL
  * @param[in] data      Data pointer, cannot be NULL
  * @param[in] len       Data length (not exceeding APP_ESPNOW_DATA_MAX_LEN)
  * @return

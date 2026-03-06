@@ -129,8 +129,10 @@ static void make_nvs_key(uint8_t node_id, char *key_buf, size_t buf_size)
  *
  * Both the node blob and node count are written. If the blob write succeeds
  * but the count write fails, the next boot will re-scan and self-heal.
+ *
+ * @param node_count  Current node count (caller reads under lock before calling)
  */
-static esp_err_t nvs_save_node(const app_espnow_node_info_t *info)
+static esp_err_t nvs_save_node(const app_espnow_node_info_t *info, uint8_t node_count)
 {
     nvs_node_record_t record = {
         .node_id = info->node_id,
@@ -149,13 +151,7 @@ static esp_err_t nvs_save_node(const app_espnow_node_info_t *info)
         return err;
     }
 
-    /* Update node count — read current s_node_count under lock */
-    uint8_t count;
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    count = s_node_count;
-    xSemaphoreGive(s_mutex);
-
-    err = app_storage_set_u8(NVS_NAMESPACE, NVS_KEY_NODE_COUNT, count);
+    err = app_storage_set_u8(NVS_NAMESPACE, NVS_KEY_NODE_COUNT, node_count);
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Save node count failed: %s", esp_err_to_name(err));
@@ -166,8 +162,10 @@ static esp_err_t nvs_save_node(const app_espnow_node_info_t *info)
 
 /**
  * @brief Delete a single node from NVS
+ *
+ * @param node_count  Current node count (caller reads under lock before calling)
  */
-static esp_err_t nvs_delete_node(uint8_t node_id)
+static esp_err_t nvs_delete_node(uint8_t node_id, uint8_t node_count)
 {
     char key[16];
     make_nvs_key(node_id, key, sizeof(key));
@@ -175,12 +173,7 @@ static esp_err_t nvs_delete_node(uint8_t node_id)
     esp_err_t err = app_storage_erase_key(NVS_NAMESPACE, key);
     if (err == ESP_OK)
     {
-        uint8_t count;
-        xSemaphoreTake(s_mutex, portMAX_DELAY);
-        count = s_node_count;
-        xSemaphoreGive(s_mutex);
-
-        app_storage_set_u8(NVS_NAMESPACE, NVS_KEY_NODE_COUNT, count);
+        app_storage_set_u8(NVS_NAMESPACE, NVS_KEY_NODE_COUNT, node_count);
     }
 
     return err;
@@ -565,18 +558,26 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
     {
         uint8_t idx = assigned_id - 1;
 
-        /* Copy node info for event posting (before releasing lock) */
+        /* Copy node info and count for use outside lock */
         app_espnow_node_online_t evt = {
             .node = s_nodes[idx].info,
             .is_new = is_new,
         };
+        uint8_t cnt = s_node_count;
 
         xSemaphoreGive(s_mutex);
 
         /* Send Register Response */
         send_register_resp(src_mac, assigned_id, req->header.seq);
 
-        /* Post Node Online Event (NVS persistence handled in event handler) */
+        /* Persist info changes for existing nodes directly here */
+        if (info_changed && !is_new)
+        {
+            nvs_save_node(&evt.node, cnt);
+            ESP_LOGI(TAG, "Node %u info updated, persisted to NVS", assigned_id);
+        }
+
+        /* Post Node Online Event (NVS persistence for new nodes handled in event handler) */
         if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_ONLINE, &evt, sizeof(evt), 0) != ESP_OK)
         {
             ESP_LOGW(TAG, "Failed to post NODE_ONLINE event (queue full)");
@@ -868,7 +869,10 @@ static void app_espnow_event_handler(void *arg, esp_event_base_t event_base,
          */
         if (evt->is_new)
         {
-            nvs_save_node(&evt->node);
+            xSemaphoreTake(s_mutex, portMAX_DELAY);
+            uint8_t cnt = s_node_count;
+            xSemaphoreGive(s_mutex);
+            nvs_save_node(&evt->node, cnt);
             ESP_LOGI(TAG, "New node %u persisted to NVS", evt->node.node_id);
         }
     }
@@ -1059,8 +1063,9 @@ cleanup_task:
     {
         send_queue_item_t sentinel = {0}; /* len == 0 is the shutdown signal */
         xQueueSend(s_send_queue, &sentinel, portMAX_DELAY);
-        /* Give the task time to process the sentinel */
-        vTaskDelay(pdMS_TO_TICKS(100));
+        for (int i = 0; i < 50 && s_send_task != NULL; i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
     }
 
 cleanup_queue:
@@ -1122,17 +1127,15 @@ esp_err_t app_espnow_deinit(void)
     }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    memset(s_nodes, 0, sizeof(s_nodes));
+    s_node_count = 0;
+    xSemaphoreGive(s_mutex);
 
     esp_now_unregister_recv_cb();
     esp_now_unregister_send_cb();
     esp_now_deinit();
 
     app_event_handler_unregister(APP_EVENT_ESPNOW_NODE_ONLINE, app_espnow_event_handler);
-
-    memset(s_nodes, 0, sizeof(s_nodes));
-    s_node_count = 0;
-
-    xSemaphoreGive(s_mutex);
 
     vSemaphoreDelete(s_mutex);
     s_mutex = NULL;
@@ -1245,11 +1248,12 @@ esp_err_t app_espnow_remove_node(uint8_t node_id)
     /* Clear node slot */
     memset(&s_nodes[idx], 0, sizeof(node_slot_t));
     s_node_count--;
+    uint8_t count_after = s_node_count;
 
     xSemaphoreGive(s_mutex);
 
     /* Delete from NVS (outside lock — NVS operations may block) */
-    nvs_delete_node(node_id);
+    nvs_delete_node(node_id, count_after);
 
     /* Delete from ESP-NOW peer list */
     if (esp_now_is_peer_exist(mac))
