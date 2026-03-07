@@ -61,6 +61,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     app_protocol_header_t header;
     uint8_t             assigned_id; /**< Assigned Node ID, 0 means refused */
+    uint8_t             channel;     /**< WiFi channel for communication */
 } app_protocol_register_resp_t;
 
 /**

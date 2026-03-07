@@ -63,8 +63,10 @@ typedef struct {
  * @brief Node Online Event Data (Passed via APP_EVENT_ESPNOW_NODE_ONLINE)
  */
 typedef struct {
-    app_espnow_node_info_t node;  /**< Node Information */
-    bool                   is_new; /**< Is new registration (false means reconnect) */
+    app_espnow_node_info_t node;         /**< Node Information */
+    bool                   is_new;        /**< Is new registration (false means reconnect) */
+    bool                   info_changed;  /**< Existing node's device_type or fw_version changed */
+    uint8_t                node_count;    /**< Total registered node count at time of event */
 } app_espnow_node_online_t;
 
 /**

@@ -38,11 +38,17 @@
 /** Broadcast Address */
 static const uint8_t BROADCAST_MAC[APP_ESPNOW_MAC_LEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-/** Default mutex timeout for recv_cb context (WiFi task) — avoid blocking WiFi */
-#define MUTEX_TIMEOUT_RECV_MS 20
-
 /** Default mutex timeout for timer task */
 #define MUTEX_TIMEOUT_TIMER_MS 50
+
+/** RX queue depth */
+#define RX_QUEUE_DEPTH 8
+
+/** RX processing task stack size */
+#define RX_TASK_STACK_SIZE 4096
+
+/** RX processing task priority */
+#define RX_TASK_PRIORITY 5
 
 /* ───────────────────────── NVS Persistence Structure ───────────────────────── */
 
@@ -59,6 +65,16 @@ typedef struct __attribute__((packed)) {
 } nvs_node_record_t;
 
 /* ───────────────────────── Internal Data Types ───────────────────────── */
+
+/**
+ * @brief RX queue item
+ */
+typedef struct {
+    uint8_t src_addr[APP_ESPNOW_MAC_LEN];
+    int     rssi;
+    int     data_len;
+    uint8_t data[ESP_NOW_MAX_DATA_LEN];
+} rx_item_t;
 
 /**
  * @brief Node Slot
@@ -78,6 +94,12 @@ static atomic_bool s_initialized = false;
 
 /** Mutex protecting the node table and ESP-NOW operations */
 static SemaphoreHandle_t s_mutex = NULL;
+
+/** RX queue for decoupling recv_cb from protocol handling */
+static QueueHandle_t s_rx_queue = NULL;
+
+/** RX processing task handle */
+static TaskHandle_t s_rx_task = NULL;
 
 /** Node Table (index = node_id - 1) */
 static node_slot_t s_nodes[APP_ESPNOW_MAX_NODES] = {0};
@@ -489,6 +511,10 @@ static bool enqueue_send(const uint8_t *dst_mac, const void *frame, uint16_t len
  */
 static void send_register_resp(const uint8_t *dst_mac, uint8_t assigned_id, uint16_t seq)
 {
+    uint8_t primary_ch = 0;
+    wifi_second_chan_t second_ch = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&primary_ch, &second_ch);
+
     app_protocol_register_resp_t resp = {
         .header = {
             .type = APP_PROTOCOL_MSG_REGISTER_RESP,
@@ -496,10 +522,11 @@ static void send_register_resp(const uint8_t *dst_mac, uint8_t assigned_id, uint
             .seq = seq,
         },
         .assigned_id = assigned_id,
+        .channel = primary_ch,
     };
 
-    ESP_LOGI(TAG, "Queuing REGISTER_RESP to " MACSTR " assigned_id=%u",
-             MAC2STR(dst_mac), assigned_id);
+    ESP_LOGI(TAG, "Queuing REGISTER_RESP to " MACSTR " assigned_id=%u channel=%u",
+             MAC2STR(dst_mac), assigned_id, primary_ch);
     enqueue_send(dst_mac, &resp, sizeof(resp), pdMS_TO_TICKS(50));
 }
 
@@ -540,8 +567,8 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
     ESP_LOGI(TAG, "REGISTER_REQ from " MACSTR " type=%u fw=%u",
              MAC2STR(src_mac), req->device_type, req->fw_version);
 
-    /* Use bounded timeout — this runs in WiFi task context */
-    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_RECV_MS)) != pdTRUE)
+    /* Runs in RX task context — safe to block */
+    if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE)
     {
         ESP_LOGW(TAG, "Failed to take mutex in handle_register_req, dropping packet");
         return;
@@ -560,24 +587,18 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
 
         /* Copy node info and count for use outside lock */
         app_espnow_node_online_t evt = {
-            .node = s_nodes[idx].info,
-            .is_new = is_new,
+            .node         = s_nodes[idx].info,
+            .is_new       = is_new,
+            .info_changed = info_changed,
+            .node_count   = s_node_count,
         };
-        uint8_t cnt = s_node_count;
 
         xSemaphoreGive(s_mutex);
 
         /* Send Register Response */
         send_register_resp(src_mac, assigned_id, req->header.seq);
 
-        /* Persist info changes for existing nodes directly here */
-        if (info_changed && !is_new)
-        {
-            nvs_save_node(&evt.node, cnt);
-            ESP_LOGI(TAG, "Node %u info updated, persisted to NVS", assigned_id);
-        }
-
-        /* Post Node Online Event (NVS persistence for new nodes handled in event handler) */
+        /* NVS persistence is handled uniformly in app_espnow_event_handler */
         if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_ONLINE, &evt, sizeof(evt), 0) != ESP_OK)
         {
             ESP_LOGW(TAG, "Failed to post NODE_ONLINE event (queue full)");
@@ -607,7 +628,7 @@ static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
     const app_protocol_heartbeat_t *hb = (const app_protocol_heartbeat_t *)data;
     uint8_t node_id = hb->header.node_id;
 
-    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_RECV_MS)) != pdTRUE)
+    if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE)
     {
         ESP_LOGW(TAG, "Failed to take mutex in handle_heartbeat, dropping packet");
         return;
@@ -675,7 +696,7 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
         return;
     }
 
-    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_RECV_MS)) != pdTRUE)
+    if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE)
     {
         ESP_LOGW(TAG, "Failed to take mutex in handle_data_report, dropping packet");
         return;
@@ -731,8 +752,7 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
 /**
  * @brief ESP-NOW Receive Callback
  *
- * Executes in WiFi Task Context, DO NOT perform blocking operations.
- * Dispatches to handlers based on protocol frame type.
+ * Executes in WiFi Task Context — only enqueue, no blocking operations.
  */
 static void app_espnow_recv_cb(const esp_now_recv_info_t *recv_info,
                                 const uint8_t *data,
@@ -744,27 +764,59 @@ static void app_espnow_recv_cb(const esp_now_recv_info_t *recv_info,
         return;
     }
 
-    const app_protocol_header_t *header = (const app_protocol_header_t *)data;
-    int rssi = recv_info->rx_ctrl->rssi;
+    if (s_rx_queue == NULL)
+        return;
 
-    switch ((app_protocol_msg_type_t)header->type)
+    rx_item_t item;
+    memcpy(item.src_addr, recv_info->src_addr, APP_ESPNOW_MAC_LEN);
+    item.rssi = recv_info->rx_ctrl->rssi;
+    item.data_len = (data_len > (int)sizeof(item.data)) ? (int)sizeof(item.data) : data_len;
+    memcpy(item.data, data, item.data_len);
+
+    if (xQueueSend(s_rx_queue, &item, 0) != pdTRUE)
     {
-    case APP_PROTOCOL_MSG_REGISTER_REQ:
-        handle_register_req(recv_info->src_addr, data, data_len, rssi);
-        break;
+        ESP_LOGW(TAG, "RX queue full, dropping packet from " MACSTR,
+                 MAC2STR(recv_info->src_addr));
+    }
+}
 
-    case APP_PROTOCOL_MSG_HEARTBEAT:
-        handle_heartbeat(recv_info->src_addr, data, data_len, rssi);
-        break;
+/**
+ * @brief Dedicated RX processing task
+ *
+ * Drains the RX queue and dispatches to protocol handlers.
+ * Runs in its own task context so handlers can safely block on mutex.
+ */
+static void espnow_rx_task(void *arg)
+{
+    (void)arg;
+    rx_item_t item;
 
-    case APP_PROTOCOL_MSG_DATA_REPORT:
-        handle_data_report(recv_info->src_addr, data, data_len, rssi);
-        break;
+    while (true)
+    {
+        if (xQueueReceive(s_rx_queue, &item, portMAX_DELAY) != pdTRUE)
+            continue;
 
-    default:
-        ESP_LOGW(TAG, "Unknown msg type 0x%02X from " MACSTR,
-                 header->type, MAC2STR(recv_info->src_addr));
-        break;
+        const app_protocol_header_t *header = (const app_protocol_header_t *)item.data;
+
+        switch ((app_protocol_msg_type_t)header->type)
+        {
+        case APP_PROTOCOL_MSG_REGISTER_REQ:
+            handle_register_req(item.src_addr, item.data, item.data_len, item.rssi);
+            break;
+
+        case APP_PROTOCOL_MSG_HEARTBEAT:
+            handle_heartbeat(item.src_addr, item.data, item.data_len, item.rssi);
+            break;
+
+        case APP_PROTOCOL_MSG_DATA_REPORT:
+            handle_data_report(item.src_addr, item.data, item.data_len, item.rssi);
+            break;
+
+        default:
+            ESP_LOGW(TAG, "Unknown msg type 0x%02X from " MACSTR,
+                     header->type, MAC2STR(item.src_addr));
+            break;
+        }
     }
 }
 
@@ -855,25 +907,15 @@ static void app_espnow_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == APP_EVENT_BASE && event_id == APP_EVENT_ESPNOW_NODE_ONLINE)
     {
         app_espnow_node_online_t *evt = (app_espnow_node_online_t *)event_data;
-        /*
-         * Persist to NVS when:
-         *   1. A new node registers (is_new == true)
-         *   2. An existing node's info changed (detected via NVS comparison)
-         *
-         * For simplicity, always save on new registration. For info changes,
-         * the register_node_locked now tracks info_changed but we handle it
-         * by always saving on is_new since info_changed nodes also get saved
-         * through the re-registration path.
-         *
-         * TODO: If needed, add a separate event or flag for info-changed updates.
-         */
-        if (evt->is_new)
+
+        /* Persist to NVS for new registrations or info changes.
+         * node_count is pre-captured under lock in handle_register_req,
+         * so no mutex needed here. */
+        if (evt->is_new || evt->info_changed)
         {
-            xSemaphoreTake(s_mutex, portMAX_DELAY);
-            uint8_t cnt = s_node_count;
-            xSemaphoreGive(s_mutex);
-            nvs_save_node(&evt->node, cnt);
-            ESP_LOGI(TAG, "New node %u persisted to NVS", evt->node.node_id);
+            nvs_save_node(&evt->node, evt->node_count);
+            ESP_LOGI(TAG, "Node %u persisted to NVS (is_new=%d info_changed=%d)",
+                     evt->node.node_id, evt->is_new, evt->info_changed);
         }
     }
 }
@@ -922,6 +964,16 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
         goto cleanup_mutex;
     }
 
+    /* ── Create RX Queue ── */
+
+    s_rx_queue = xQueueCreate(RX_QUEUE_DEPTH, sizeof(rx_item_t));
+    if (s_rx_queue == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create RX queue");
+        err = ESP_ERR_NO_MEM;
+        goto cleanup_send_queue;
+    }
+
     /* ── Create Send Task ── */
 
     if (xTaskCreate(espnow_send_task, "espnow_send", 3072, NULL, 5, &s_send_task) != pdPASS)
@@ -929,6 +981,14 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
         ESP_LOGE(TAG, "Failed to create send task");
         err = ESP_ERR_NO_MEM;
         goto cleanup_queue;
+    }
+
+    if (xTaskCreate(espnow_rx_task, "espnow_rx", RX_TASK_STACK_SIZE, NULL,
+                    RX_TASK_PRIORITY, &s_rx_task) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create RX task");
+        err = ESP_ERR_NO_MEM;
+        goto cleanup_send_task;
     }
 
     /* ── Initialize Node Table ── */
@@ -1058,6 +1118,13 @@ cleanup_espnow:
 cleanup_handler:
     app_event_handler_unregister(APP_EVENT_ESPNOW_NODE_ONLINE, app_espnow_event_handler);
 
+cleanup_send_task:
+    if (s_rx_task != NULL)
+    {
+        vTaskDelete(s_rx_task);
+        s_rx_task = NULL;
+    }
+
 cleanup_task:
     /* Send shutdown sentinel and wait for task to exit */
     {
@@ -1071,6 +1138,13 @@ cleanup_task:
 cleanup_queue:
     vQueueDelete(s_send_queue);
     s_send_queue = NULL;
+
+cleanup_send_queue:
+    if (s_rx_queue != NULL)
+    {
+        vQueueDelete(s_rx_queue);
+        s_rx_queue = NULL;
+    }
 
 cleanup_mutex:
     vSemaphoreDelete(s_mutex);
@@ -1120,10 +1194,23 @@ esp_err_t app_espnow_deinit(void)
         }
     }
 
+    /* Stop RX task */
+    if (s_rx_task != NULL)
+    {
+        vTaskDelete(s_rx_task);
+        s_rx_task = NULL;
+    }
+
     if (s_send_queue != NULL)
     {
         vQueueDelete(s_send_queue);
         s_send_queue = NULL;
+    }
+
+    if (s_rx_queue != NULL)
+    {
+        vQueueDelete(s_rx_queue);
+        s_rx_queue = NULL;
     }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
