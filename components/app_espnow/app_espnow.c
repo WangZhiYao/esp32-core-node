@@ -57,7 +57,8 @@ static const uint8_t BROADCAST_MAC[APP_ESPNOW_MAC_LEN] = {0xFF, 0xFF, 0xFF, 0xFF
  *
  * Only persists necessary fields. Runtime state (status, last_seen_ms, rssi) is not stored.
  */
-typedef struct __attribute__((packed)) {
+typedef struct __attribute__((packed))
+{
     uint8_t node_id;
     uint8_t mac[APP_ESPNOW_MAC_LEN];
     uint8_t device_type;
@@ -69,10 +70,11 @@ typedef struct __attribute__((packed)) {
 /**
  * @brief RX queue item
  */
-typedef struct {
+typedef struct
+{
     uint8_t src_addr[APP_ESPNOW_MAC_LEN];
-    int     rssi;
-    int     data_len;
+    int rssi;
+    int data_len;
     uint8_t data[ESP_NOW_MAX_DATA_LEN];
 } rx_item_t;
 
@@ -82,8 +84,9 @@ typedef struct {
  * used == true means this ID is assigned.
  * Array index = node_id - 1.
  */
-typedef struct {
-    bool                   used;
+typedef struct
+{
+    bool used;
     app_espnow_node_info_t info;
 } node_slot_t;
 
@@ -130,9 +133,10 @@ static TaskHandle_t s_send_task = NULL;
  *
  * A special sentinel (len == 0) signals the send task to exit gracefully.
  */
-typedef struct {
+typedef struct
+{
     uint8_t dst_mac[APP_ESPNOW_MAC_LEN];
-    uint16_t len;    /**< 0 = shutdown sentinel */
+    uint16_t len; /**< 0 = shutdown sentinel */
     uint8_t data[SEND_QUEUE_FRAME_MAX_LEN];
 } send_queue_item_t;
 
@@ -312,8 +316,8 @@ static uint8_t alloc_node_id_locked(void)
  * @return Assigned Node ID, 0 on failure
  */
 static uint8_t register_node_locked(const uint8_t *mac, uint8_t device_type,
-                                     uint8_t fw_version, int rssi,
-                                     bool *out_is_new, bool *out_info_changed)
+                                    uint8_t fw_version, int rssi,
+                                    bool *out_is_new, bool *out_info_changed)
 {
     *out_is_new = false;
     *out_info_changed = false;
@@ -475,7 +479,7 @@ static void espnow_send_task(void *arg)
  * @return true if enqueued successfully, false otherwise
  */
 static bool enqueue_send(const uint8_t *dst_mac, const void *frame, uint16_t len,
-                          TickType_t ticks_to_wait)
+                         TickType_t ticks_to_wait)
 {
     if (len > SEND_QUEUE_FRAME_MAX_LEN)
     {
@@ -554,7 +558,7 @@ static void send_heartbeat_ack(const uint8_t *dst_mac, uint8_t node_id, uint16_t
  * @brief Handle Register Request
  */
 static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
-                                 int data_len, int rssi)
+                                int data_len, int rssi)
 {
     if (data_len < (int)sizeof(app_protocol_register_req_t))
     {
@@ -578,8 +582,8 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
     bool info_changed = false;
 
     uint8_t assigned_id = register_node_locked(src_mac, req->device_type,
-                                                req->fw_version, rssi,
-                                                &is_new, &info_changed);
+                                               req->fw_version, rssi,
+                                               &is_new, &info_changed);
 
     if (assigned_id != APP_ESPNOW_NODE_ID_INVALID)
     {
@@ -587,10 +591,10 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
 
         /* Copy node info and count for use outside lock */
         app_espnow_node_online_t evt = {
-            .node         = s_nodes[idx].info,
-            .is_new       = is_new,
+            .node = s_nodes[idx].info,
+            .is_new = is_new,
             .info_changed = info_changed,
-            .node_count   = s_node_count,
+            .node_count = s_node_count,
         };
 
         xSemaphoreGive(s_mutex);
@@ -617,7 +621,7 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
  * @brief Handle Heartbeat
  */
 static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
-                              int data_len, int rssi)
+                             int data_len, int rssi)
 {
     if (data_len < (int)sizeof(app_protocol_heartbeat_t))
     {
@@ -671,7 +675,7 @@ static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
  * @brief Handle Data Report
  */
 static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
-                                int data_len, int rssi)
+                               int data_len, int rssi)
 {
     if (data_len < (int)(sizeof(app_protocol_header_t) + sizeof(uint16_t)))
     {
@@ -755,8 +759,8 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
  * Executes in WiFi Task Context — only enqueue, no blocking operations.
  */
 static void app_espnow_recv_cb(const esp_now_recv_info_t *recv_info,
-                                const uint8_t *data,
-                                int data_len)
+                               const uint8_t *data,
+                               int data_len)
 {
     if (recv_info == NULL || data == NULL || data_len < (int)sizeof(app_protocol_header_t))
     {
@@ -830,7 +834,11 @@ static void app_espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_
         return;
     }
 
-    if (status != ESP_NOW_SEND_SUCCESS)
+    if (status == ESP_NOW_SEND_SUCCESS)
+    {
+        ESP_LOGI(TAG, "Send to " MACSTR " OK", MAC2STR(tx_info->des_addr));
+    }
+    else
     {
         ESP_LOGW(TAG, "Send to " MACSTR " failed", MAC2STR(tx_info->des_addr));
     }
@@ -1130,7 +1138,8 @@ cleanup_task:
     {
         send_queue_item_t sentinel = {0}; /* len == 0 is the shutdown signal */
         xQueueSend(s_send_queue, &sentinel, portMAX_DELAY);
-        for (int i = 0; i < 50 && s_send_task != NULL; i++) {
+        for (int i = 0; i < 50 && s_send_task != NULL; i++)
+        {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }

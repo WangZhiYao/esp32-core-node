@@ -8,6 +8,7 @@
 #include "app_network.h"
 #include "app_mqtt.h"
 #include "app_espnow.h"
+#include "app_sntp.h"
 
 #define TAG "app_main"
 
@@ -59,7 +60,7 @@ static void main_event_handler(void *arg, esp_event_base_t event_base,
         /* event_data is esp_netif_ip_info_t pointer */
         esp_netif_ip_info_t *ip_info = (esp_netif_ip_info_t *)event_data;
         ESP_LOGI(TAG, "WiFi station got IP: " IPSTR, IP2STR(&ip_info->ip));
-        /* TODO: Start network-dependent services here (MQTT, HTTP, etc.) */
+        app_sntp_start();
         break;
     }
 
@@ -153,7 +154,21 @@ void app_main(void)
         return;
     }
 
-    /* 6. Initialize ESP-NOW Gateway Module */
+    /* 6. Initialize SNTP Module */
+    app_sntp_config_t sntp_config = {
+        .ntp_server = CONFIG_SNTP_SERVER,
+        .timezone = CONFIG_SNTP_TIMEZONE,
+        .sync_interval_h = CONFIG_SNTP_SYNC_INTERVAL_H,
+    };
+
+    err = app_sntp_init(&sntp_config);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to initialize SNTP: %s", esp_err_to_name(err));
+        return;
+    }
+
+    /* 7. Initialize ESP-NOW Gateway Module */
     const char *pmk_str = CONFIG_ESPNOW_PMK;
     app_espnow_config_t espnow_config = {
         .pmk = (pmk_str[0] != '\0') ? (const uint8_t *)pmk_str : NULL,

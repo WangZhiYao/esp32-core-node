@@ -101,4 +101,30 @@ menu "Project Configuration"
 
     endmenu
 
+    menu "SNTP Configuration"
+
+        config SNTP_SERVER
+            string "NTP Server"
+            default "pool.ntp.org"
+            help
+              Hostname of the NTP server used for time synchronization.
+
+        config SNTP_TIMEZONE
+            string "POSIX Timezone String"
+            default "CST-8"
+            help
+              POSIX timezone string. Examples:
+              "UTC0" for UTC, "CST-8" for China Standard Time (UTC+8),
+              "EST5EDT" for US Eastern with DST.
+
+        config SNTP_SYNC_INTERVAL_H
+            int "Sync Interval (hours)"
+            default 1
+            range 1 24
+            help
+              How often (in hours) the device re-synchronizes its clock
+              with the NTP server after the initial sync.
+
+    endmenu
+
 endmenu
