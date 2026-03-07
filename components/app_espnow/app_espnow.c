@@ -424,7 +424,12 @@ static esp_err_t ensure_unicast_peer(const uint8_t *mac)
         peer.channel = 0;
         peer.ifidx = WIFI_IF_STA;
         peer.encrypt = false;
-        return esp_now_add_peer(&peer);
+        esp_err_t err = esp_now_add_peer(&peer);
+        if (err == ESP_ERR_ESPNOW_FULL) {
+            ESP_LOGE(TAG, "ESP-NOW peer list full! Cannot add " MACSTR, MAC2STR(mac));
+            /* TODO: Implement LRU peer removal if supporting >20 nodes */
+        }
+        return err;
     }
     return ESP_OK;
 }
@@ -893,8 +898,9 @@ static void heartbeat_check_callback(TimerHandle_t timer)
     /* Post events after releasing the lock to prevent deadlock */
     for (uint8_t i = 0; i < offline_count; i++)
     {
-        ESP_LOGW(TAG, "Node %u (" MACSTR ") heartbeat timeout",
-                 offline_evts[i].node.node_id, MAC2STR(offline_evts[i].node.mac));
+        /* Avoid blocking logging in Timer Task. Only log if strictly necessary or use async logging.
+           Here we rely on the event handler to log if needed. */
+        // ESP_LOGW(TAG, "Node %u timeout", offline_evts[i].node.node_id);
 
         if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_OFFLINE, &offline_evts[i],
                                         sizeof(app_espnow_node_offline_t), pdMS_TO_TICKS(10)) != ESP_OK)
