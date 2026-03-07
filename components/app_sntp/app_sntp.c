@@ -84,8 +84,10 @@ esp_err_t app_sntp_start(void)
     sntp_set_time_sync_notification_cb(sntp_sync_notification_cb);
     esp_sntp_init();
 
-    /* Create periodic re-sync timer */
-    TickType_t period = pdMS_TO_TICKS((uint32_t)s_sync_interval_h * 3600U * 1000U);
+    /* Create periodic re-sync timer.
+     * Cap at 24h to prevent pdMS_TO_TICKS overflow on high tick-rate configs. */
+    int capped_h = (s_sync_interval_h > 24) ? 24 : s_sync_interval_h;
+    TickType_t period = pdMS_TO_TICKS((uint32_t)capped_h * 3600U * 1000U);
     s_resync_timer = xTimerCreate("sntp_resync", period, pdTRUE, NULL, resync_timer_cb);
     if (s_resync_timer != NULL) {
         xTimerStart(s_resync_timer, 0);

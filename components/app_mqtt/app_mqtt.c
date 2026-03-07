@@ -255,8 +255,8 @@ static esp_err_t mqtt_client_create_and_start_locked(void)
      */
     const esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = s_config.broker_uri,
-        .credentials.username = s_config.username,
-        .credentials.authentication.password = s_config.password,
+        .credentials.username = (s_config.username[0] != '\0') ? s_config.username : NULL,
+        .credentials.authentication.password = (s_config.password[0] != '\0') ? s_config.password : NULL,
         .credentials.client_id = s_config.client_id,
     };
 

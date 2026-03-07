@@ -35,8 +35,8 @@
  * @param event_id   Event ID
  * @param event_data Pointer to event data
  */
-static void main_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
+static void app_event_handler(void *arg, esp_event_base_t event_base,
+                              int32_t event_id, void *event_data)
 {
     /* Only process APP_EVENT_BASE events, filter others */
     if (event_base != APP_EVENT_BASE)
@@ -118,7 +118,7 @@ void app_main(void)
     }
 
     /* 3. Register Application Layer Event Handler (Listen to all APP_EVENT_BASE events) */
-    err = app_event_handler_register(ESP_EVENT_ANY_ID, main_event_handler, NULL);
+    err = app_event_handler_register(ESP_EVENT_ANY_ID, app_event_handler, NULL);
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to register event handler: %s", esp_err_to_name(err));

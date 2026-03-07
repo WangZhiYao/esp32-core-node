@@ -603,7 +603,7 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
         send_register_resp(src_mac, assigned_id, req->header.seq);
 
         /* NVS persistence is handled uniformly in app_espnow_event_handler */
-        if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_ONLINE, &evt, sizeof(evt), 0) != ESP_OK)
+        if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_ONLINE, &evt, sizeof(evt), pdMS_TO_TICKS(10)) != ESP_OK)
         {
             ESP_LOGW(TAG, "Failed to post NODE_ONLINE event (queue full)");
         }
@@ -724,7 +724,7 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
                     .node = node_info_copy,
                     .is_new = false,
                 };
-                if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_ONLINE, &online_evt, sizeof(online_evt), 0) != ESP_OK)
+                if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_ONLINE, &online_evt, sizeof(online_evt), pdMS_TO_TICKS(10)) != ESP_OK)
                 {
                     ESP_LOGW(TAG, "Failed to post NODE_ONLINE event (queue full)");
                 }
@@ -738,7 +738,7 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
             data_evt.data_len = report->data_len;
             memcpy(data_evt.data, report->data, report->data_len);
 
-            if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_DATA, &data_evt, sizeof(data_evt), 0) != ESP_OK)
+            if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_DATA, &data_evt, sizeof(data_evt), pdMS_TO_TICKS(10)) != ESP_OK)
             {
                 ESP_LOGW(TAG, "Failed to post NODE_DATA event (queue full)");
             }
@@ -897,7 +897,7 @@ static void heartbeat_check_callback(TimerHandle_t timer)
                  offline_evts[i].node.node_id, MAC2STR(offline_evts[i].node.mac));
 
         if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_OFFLINE, &offline_evts[i],
-                                        sizeof(app_espnow_node_offline_t), 0) != ESP_OK)
+                                        sizeof(app_espnow_node_offline_t), pdMS_TO_TICKS(10)) != ESP_OK)
         {
             ESP_LOGW(TAG, "Failed to post NODE_OFFLINE event (queue full)");
         }
@@ -929,6 +929,52 @@ static void app_espnow_event_handler(void *arg, esp_event_base_t event_base,
 }
 
 /* ───────────────────── Public API ───────────────────── */
+
+static void app_espnow_init_cleanup(bool stop_send_task, bool unregister_handler,
+                                    bool deinit_espnow, bool unregister_recv_cb,
+                                    bool unregister_send_cb, bool delete_timer)
+{
+    if (delete_timer && s_heartbeat_timer != NULL)
+    {
+        xTimerDelete(s_heartbeat_timer, portMAX_DELAY);
+        s_heartbeat_timer = NULL;
+    }
+    if (unregister_send_cb)
+        esp_now_unregister_send_cb();
+    if (unregister_recv_cb)
+        esp_now_unregister_recv_cb();
+    if (deinit_espnow)
+        esp_now_deinit();
+    if (unregister_handler)
+        app_event_handler_unregister(APP_EVENT_ESPNOW_NODE_ONLINE, app_espnow_event_handler);
+    if (s_rx_task != NULL)
+    {
+        vTaskDelete(s_rx_task);
+        s_rx_task = NULL;
+    }
+    if (stop_send_task && s_send_task != NULL)
+    {
+        send_queue_item_t sentinel = {0};
+        xQueueSend(s_send_queue, &sentinel, portMAX_DELAY);
+        for (int i = 0; i < 50 && s_send_task != NULL; i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (s_send_queue != NULL)
+    {
+        vQueueDelete(s_send_queue);
+        s_send_queue = NULL;
+    }
+    if (s_rx_queue != NULL)
+    {
+        vQueueDelete(s_rx_queue);
+        s_rx_queue = NULL;
+    }
+    if (s_mutex != NULL)
+    {
+        vSemaphoreDelete(s_mutex);
+        s_mutex = NULL;
+    }
+}
 
 esp_err_t app_espnow_init(const app_espnow_config_t *config)
 {
@@ -968,8 +1014,8 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     if (s_send_queue == NULL)
     {
         ESP_LOGE(TAG, "Failed to create send queue");
-        err = ESP_ERR_NO_MEM;
-        goto cleanup_mutex;
+        app_espnow_init_cleanup(false, false, false, false, false, false);
+        return ESP_ERR_NO_MEM;
     }
 
     /* ── Create RX Queue ── */
@@ -978,8 +1024,8 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     if (s_rx_queue == NULL)
     {
         ESP_LOGE(TAG, "Failed to create RX queue");
-        err = ESP_ERR_NO_MEM;
-        goto cleanup_send_queue;
+        app_espnow_init_cleanup(false, false, false, false, false, false);
+        return ESP_ERR_NO_MEM;
     }
 
     /* ── Create Send Task ── */
@@ -987,16 +1033,16 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     if (xTaskCreate(espnow_send_task, "espnow_send", 3072, NULL, 5, &s_send_task) != pdPASS)
     {
         ESP_LOGE(TAG, "Failed to create send task");
-        err = ESP_ERR_NO_MEM;
-        goto cleanup_queue;
+        app_espnow_init_cleanup(false, false, false, false, false, false);
+        return ESP_ERR_NO_MEM;
     }
 
     if (xTaskCreate(espnow_rx_task, "espnow_rx", RX_TASK_STACK_SIZE, NULL,
                     RX_TASK_PRIORITY, &s_rx_task) != pdPASS)
     {
         ESP_LOGE(TAG, "Failed to create RX task");
-        err = ESP_ERR_NO_MEM;
-        goto cleanup_send_task;
+        app_espnow_init_cleanup(true, false, false, false, false, false);
+        return ESP_ERR_NO_MEM;
     }
 
     /* ── Initialize Node Table ── */
@@ -1015,7 +1061,8 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to register internal event handler: %s", esp_err_to_name(err));
-        goto cleanup_task;
+        app_espnow_init_cleanup(true, false, false, false, false, false);
+        return err;
     }
 
     /* ── Initialize ESP-NOW ── */
@@ -1024,7 +1071,8 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "esp_now_init failed: %s", esp_err_to_name(err));
-        goto cleanup_handler;
+        app_espnow_init_cleanup(true, true, false, false, false, false);
+        return err;
     }
 
     /* ── Set Primary Master Key (PMK) ── */
@@ -1035,7 +1083,8 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
         if (err != ESP_OK)
         {
             ESP_LOGE(TAG, "esp_now_set_pmk failed: %s", esp_err_to_name(err));
-            goto cleanup_espnow;
+            app_espnow_init_cleanup(true, true, true, false, false, false);
+            return err;
         }
         ESP_LOGI(TAG, "PMK configured");
     }
@@ -1046,14 +1095,16 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Register recv callback failed: %s", esp_err_to_name(err));
-        goto cleanup_espnow;
+        app_espnow_init_cleanup(true, true, true, false, false, false);
+        return err;
     }
 
     err = esp_now_register_send_cb(app_espnow_send_cb);
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Register send callback failed: %s", esp_err_to_name(err));
-        goto cleanup_recv_cb;
+        app_espnow_init_cleanup(true, true, true, true, false, false);
+        return err;
     }
 
     /* ── Add Broadcast Peer ── */
@@ -1062,7 +1113,8 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Add broadcast peer failed: %s", esp_err_to_name(err));
-        goto cleanup_send_cb;
+        app_espnow_init_cleanup(true, true, true, true, true, false);
+        return err;
     }
 
     /* ── Add ESP-NOW peers for restored nodes ── */
@@ -1087,15 +1139,15 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
     if (s_heartbeat_timer == NULL)
     {
         ESP_LOGE(TAG, "Failed to create heartbeat timer");
-        err = ESP_ERR_NO_MEM;
-        goto cleanup_send_cb;
+        app_espnow_init_cleanup(true, true, true, true, true, false);
+        return ESP_ERR_NO_MEM;
     }
 
     if (xTimerStart(s_heartbeat_timer, pdMS_TO_TICKS(1000)) != pdPASS)
     {
         ESP_LOGE(TAG, "Failed to start heartbeat timer");
-        err = ESP_FAIL;
-        goto cleanup_timer;
+        app_espnow_init_cleanup(true, true, true, true, true, true);
+        return ESP_FAIL;
     }
 
     /* Print STA MAC Address */
@@ -1107,59 +1159,6 @@ esp_err_t app_espnow_init(const app_espnow_config_t *config)
 
     atomic_store(&s_initialized, true);
     return ESP_OK;
-
-    /* ── Error Rollback ── */
-
-cleanup_timer:
-    xTimerDelete(s_heartbeat_timer, portMAX_DELAY);
-    s_heartbeat_timer = NULL;
-
-cleanup_send_cb:
-    esp_now_unregister_send_cb();
-
-cleanup_recv_cb:
-    esp_now_unregister_recv_cb();
-
-cleanup_espnow:
-    esp_now_deinit();
-
-cleanup_handler:
-    app_event_handler_unregister(APP_EVENT_ESPNOW_NODE_ONLINE, app_espnow_event_handler);
-
-cleanup_send_task:
-    if (s_rx_task != NULL)
-    {
-        vTaskDelete(s_rx_task);
-        s_rx_task = NULL;
-    }
-
-cleanup_task:
-    /* Send shutdown sentinel and wait for task to exit */
-    {
-        send_queue_item_t sentinel = {0}; /* len == 0 is the shutdown signal */
-        xQueueSend(s_send_queue, &sentinel, portMAX_DELAY);
-        for (int i = 0; i < 50 && s_send_task != NULL; i++)
-        {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-    }
-
-cleanup_queue:
-    vQueueDelete(s_send_queue);
-    s_send_queue = NULL;
-
-cleanup_send_queue:
-    if (s_rx_queue != NULL)
-    {
-        vQueueDelete(s_rx_queue);
-        s_rx_queue = NULL;
-    }
-
-cleanup_mutex:
-    vSemaphoreDelete(s_mutex);
-    s_mutex = NULL;
-
-    return err;
 }
 
 esp_err_t app_espnow_deinit(void)
@@ -1210,6 +1209,12 @@ esp_err_t app_espnow_deinit(void)
         s_rx_task = NULL;
     }
 
+    /* Unregister callbacks and deinit ESP-NOW before deleting queues,
+     * so recv_cb cannot fire and access freed queue handles. */
+    esp_now_unregister_recv_cb();
+    esp_now_unregister_send_cb();
+    esp_now_deinit();
+
     if (s_send_queue != NULL)
     {
         vQueueDelete(s_send_queue);
@@ -1226,10 +1231,6 @@ esp_err_t app_espnow_deinit(void)
     memset(s_nodes, 0, sizeof(s_nodes));
     s_node_count = 0;
     xSemaphoreGive(s_mutex);
-
-    esp_now_unregister_recv_cb();
-    esp_now_unregister_send_cb();
-    esp_now_deinit();
 
     app_event_handler_unregister(APP_EVENT_ESPNOW_NODE_ONLINE, app_espnow_event_handler);
 

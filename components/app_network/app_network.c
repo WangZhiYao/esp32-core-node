@@ -136,14 +136,6 @@ static void schedule_reconnect(void)
     int next_retry = atomic_fetch_add(&s_retry_num, 1) + 1;
     TickType_t delay = get_retry_delay_ticks(next_retry - 1);
 
-    ESP_LOGI(TAG, "Scheduling reconnect attempt %d/%s in %lu ms...",
-             next_retry,
-             (s_max_retry_count > 0)
-                 ? (char[8]){0} /* Placeholder */
-                 : "inf",
-             (unsigned long)(delay * portTICK_PERIOD_MS));
-
-    /* Correct logging: reprint */
     if (s_max_retry_count > 0)
     {
         ESP_LOGI(TAG, "Reconnect attempt %d/%d, delay %lu ms",
