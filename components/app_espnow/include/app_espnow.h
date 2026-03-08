@@ -78,13 +78,15 @@ typedef struct {
 
 /**
  * @brief Node Data Report Event Data (Passed via APP_EVENT_ESPNOW_NODE_DATA)
+ *
+ * data contains the full app_protocol_data_report_t frame (header + sensor_type + data_len + payload).
  */
 typedef struct {
-    uint8_t  node_id;                                /**< Node ID */
-    uint8_t  src_addr[APP_ESPNOW_MAC_LEN];          /**< Sender MAC */
-    int      rssi;                                   /**< RSSI */
-    uint16_t data_len;                               /**< User Data Length */
-    uint8_t  data[APP_ESPNOW_USER_DATA_MAX_LEN];    /**< User Data */
+    uint8_t  node_id;                             /**< Node ID */
+    uint8_t  src_addr[APP_ESPNOW_MAC_LEN];        /**< Sender MAC */
+    int      rssi;                                /**< RSSI */
+    uint16_t data_len;                            /**< Full frame length */
+    uint8_t  data[APP_ESPNOW_DATA_MAX_LEN];       /**< Full DATA_REPORT frame */
 } app_espnow_node_data_t;
 
 /* ───────────────────────── Configuration ───────────────────────── */

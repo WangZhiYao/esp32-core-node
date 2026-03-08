@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <inttypes.h>
+#include <string.h>
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_mac.h>
@@ -9,6 +10,7 @@
 #include "app_mqtt.h"
 #include "app_espnow.h"
 #include "app_sntp.h"
+#include "app_protocol.h"
 
 #define TAG "app_main"
 
@@ -23,6 +25,68 @@
 
 #define ESPNOW_HEARTBEAT_TIMEOUT_S CONFIG_ESPNOW_HEARTBEAT_TIMEOUT_S
 #define ESPNOW_HEARTBEAT_CHECK_S CONFIG_ESPNOW_HEARTBEAT_CHECK_S
+
+/**
+ * @brief Parse and publish a DATA_REPORT frame received from a child node
+ */
+static void handle_node_data(const app_espnow_node_data_t *evt)
+{
+    if (evt->data_len < offsetof(app_protocol_data_report_t, data))
+    {
+        ESP_LOGW(TAG, "Node %u: data too short (%u bytes)", evt->node_id, evt->data_len);
+        return;
+    }
+
+    const app_protocol_data_report_t *report =
+        (const app_protocol_data_report_t *)evt->data;
+
+    if (report->sensor_type == APP_PROTOCOL_SENSOR_ENV)
+    {
+        if (report->data_len < sizeof(app_protocol_env_data_t))
+        {
+            ESP_LOGW(TAG, "Node %u: ENV payload too short (%u bytes)",
+                     evt->node_id, report->data_len);
+            return;
+        }
+
+        const app_protocol_env_data_t *env =
+            (const app_protocol_env_data_t *)report->data;
+
+        char topic[APP_MQTT_TOPIC_MAX_LEN];
+        char payload[APP_MQTT_PAYLOAD_MAX_LEN];
+
+        snprintf(topic, sizeof(topic), "node/%u/data", evt->node_id);
+        snprintf(payload, sizeof(payload),
+                 "{\"node_id\":%u,\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
+                 "\"rssi\":%d,"
+                 "\"temperature\":%.2f,\"pressure\":%.2f,"
+                 "\"humidity\":%.2f,\"lux\":%.2f}",
+                 evt->node_id,
+                 evt->src_addr[0], evt->src_addr[1], evt->src_addr[2],
+                 evt->src_addr[3], evt->src_addr[4], evt->src_addr[5],
+                 evt->rssi,
+                 env->temperature, env->pressure,
+                 env->humidity, env->lux);
+
+        ESP_LOGI(TAG, "Node %u: Publishing to MQTT topic '%s': %s",
+                 evt->node_id, topic, payload);
+
+        int msg_id = app_mqtt_publish(topic, payload, 0, 0);
+        if (msg_id < 0)
+        {
+            ESP_LOGW(TAG, "Node %u: MQTT publish failed", evt->node_id);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Node %u: published ENV data to %s", evt->node_id, topic);
+        }
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Node %u: unknown sensor type 0x%02x",
+                 evt->node_id, report->sensor_type);
+    }
+}
 
 /**
  * @brief Application Layer Event Handler
@@ -87,7 +151,7 @@ static void app_event_handler(void *arg, esp_event_base_t event_base,
         app_espnow_node_data_t *evt = (app_espnow_node_data_t *)event_data;
         ESP_LOGI(TAG, "Node %u data: %u bytes, RSSI: %d",
                  evt->node_id, evt->data_len, evt->rssi);
-        /* TODO: Process data reported by child node */
+        handle_node_data(evt);
         break;
     }
 

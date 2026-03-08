@@ -735,13 +735,13 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
                 }
             }
 
-            /* Construct and post data event */
+            /* Construct and post data event — pass full frame so upper layer can parse sensor_type */
             app_espnow_node_data_t data_evt = {0};
             data_evt.node_id = node_id;
             memcpy(data_evt.src_addr, src_mac, APP_ESPNOW_MAC_LEN);
             data_evt.rssi = rssi;
-            data_evt.data_len = report->data_len;
-            memcpy(data_evt.data, report->data, report->data_len);
+            data_evt.data_len = (uint16_t)data_len;
+            memcpy(data_evt.data, data, data_len);
 
             if (app_event_post_with_timeout(APP_EVENT_ESPNOW_NODE_DATA, &data_evt, sizeof(data_evt), pdMS_TO_TICKS(10)) != ESP_OK)
             {
