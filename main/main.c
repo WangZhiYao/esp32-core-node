@@ -52,10 +52,9 @@ static void handle_node_data(const app_espnow_node_data_t *evt)
         const app_protocol_env_data_t *env =
             (const app_protocol_env_data_t *)report->data;
 
-        char topic[APP_MQTT_TOPIC_MAX_LEN];
+        char *topic = "home/iot/env";
         char payload[APP_MQTT_PAYLOAD_MAX_LEN];
 
-        snprintf(topic, sizeof(topic), "node/%u/data", evt->node_id);
         snprintf(payload, sizeof(payload),
                  "{\"node_id\":%u,\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
                  "\"rssi\":%d,"
