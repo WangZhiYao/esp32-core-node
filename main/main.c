@@ -31,6 +31,7 @@
  */
 static void handle_node_data(const app_espnow_node_data_t *evt)
 {
+    ESP_LOGI(TAG, "stack hwm: %u", uxTaskGetStackHighWaterMark(NULL));
     if (evt->data_len < offsetof(app_protocol_data_report_t, data))
     {
         ESP_LOGW(TAG, "Node %u: data too short (%u bytes)", evt->node_id, evt->data_len);
@@ -78,6 +79,46 @@ static void handle_node_data(const app_espnow_node_data_t *evt)
         else
         {
             ESP_LOGI(TAG, "Node %u: published ENV data to %s", evt->node_id, topic);
+        }
+    }
+    else if (report->sensor_type == APP_PROTOCOL_SENSOR_IAQ)
+    {
+        if (report->data_len < sizeof(app_protocol_iaq_data_t))
+        {
+            ESP_LOGW(TAG, "Node %u: IAQ payload too short (%u bytes)",
+                     evt->node_id, report->data_len);
+            return;
+        }
+
+        const app_protocol_iaq_data_t *iaq =
+            (const app_protocol_iaq_data_t *)report->data;
+
+        char *topic = "home/iot/iaq";
+        char payload[APP_MQTT_PAYLOAD_MAX_LEN];
+
+        snprintf(payload, sizeof(payload),
+                 "{\"node_id\":%u,\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
+                 "\"rssi\":%d,"
+                 "\"temperature\":%.2f,\"humidity\":%.2f,"
+                 "\"eco2\":%u,\"tvoc\":%u,\"aqi\":%u}",
+                 evt->node_id,
+                 evt->src_addr[0], evt->src_addr[1], evt->src_addr[2],
+                 evt->src_addr[3], evt->src_addr[4], evt->src_addr[5],
+                 evt->rssi,
+                 iaq->temperature, iaq->humidity,
+                 iaq->eco2, iaq->tvoc, iaq->aqi);
+
+        ESP_LOGI(TAG, "Node %u: Publishing to MQTT topic '%s': %s",
+                 evt->node_id, topic, payload);
+
+        int msg_id = app_mqtt_publish(topic, payload, 0, 0);
+        if (msg_id < 0)
+        {
+            ESP_LOGW(TAG, "Node %u: MQTT publish failed", evt->node_id);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Node %u: published IAQ data to %s", evt->node_id, topic);
         }
     }
     else
