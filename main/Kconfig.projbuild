@@ -117,12 +117,12 @@ menu "Project Configuration"
               "UTC0" for UTC, "CST-8" for China Standard Time (UTC+8),
               "EST5EDT" for US Eastern with DST.
 
-        config SNTP_SYNC_INTERVAL_H
-            int "Sync Interval (hours)"
+        config SNTP_SYNC_INTERVAL
+            int "Sync Interval (minutes)"
             default 1
-            range 1 24
+            range 1 1440
             help
-              How often (in hours) the device re-synchronizes its clock
+              How often (in minutes) the device re-synchronizes its clock
               with the NTP server after the initial sync.
 
     endmenu

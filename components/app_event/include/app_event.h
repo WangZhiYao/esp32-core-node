@@ -32,6 +32,8 @@ typedef enum
     APP_EVENT_ESPNOW_NODE_ONLINE,  /*!< Child node online (new or reconnect), event_data: app_espnow_node_online_t* */
     APP_EVENT_ESPNOW_NODE_OFFLINE, /*!< Child node offline (heartbeat timeout), event_data: app_espnow_node_offline_t* */
     APP_EVENT_ESPNOW_NODE_DATA,    /*!< Child node data report, event_data: app_espnow_node_data_t* */
+    /* ── SNTP Events ── */
+    APP_EVENT_SNTP_RESYNC,         /*!< Periodic SNTP re-sync request (no event_data) */
 } app_event_id_t;
 
 /**

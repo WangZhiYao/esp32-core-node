@@ -16,7 +16,7 @@ extern "C" {
 typedef struct {
     const char *ntp_server;      /**< NTP server hostname, e.g., "pool.ntp.org" */
     const char *timezone;        /**< POSIX timezone string, e.g., "CST-8" for UTC+8 */
-    int         sync_interval_h; /**< Periodic re-sync interval in hours */
+    int         sync_interval;   /**< Periodic re-sync interval in minutes */
 } app_sntp_config_t;
 
 /* ───────────────────────── API ───────────────────────── */
@@ -57,6 +57,14 @@ esp_err_t app_sntp_start(void);
  *  - ESP_ERR_INVALID_STATE Not initialized or not started
  */
 esp_err_t app_sntp_stop(void);
+
+/**
+ * @brief Trigger an SNTP re-sync
+ *
+ * Restarts the SNTP client to perform a time re-synchronization.
+ * Must be called from a task context (not from a timer callback).
+ */
+void app_sntp_resync(void);
 
 #ifdef __cplusplus
 }

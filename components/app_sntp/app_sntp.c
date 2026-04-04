@@ -9,13 +9,15 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/timers.h>
 
+#include "app_event.h"
+
 #define TAG "app_sntp"
 
 /* ───────────────────────── Internal State ───────────────────────── */
 
 static char           s_ntp_server[64];
 static char           s_timezone[32];
-static int            s_sync_interval_h;
+static int            s_sync_interval;
 static TimerHandle_t  s_resync_timer;
 static bool           s_initialized;
 static bool           s_started;
@@ -36,7 +38,7 @@ static void resync_timer_cb(TimerHandle_t timer)
 {
     (void)timer;
     ESP_LOGI(TAG, "Periodic re-sync triggered");
-    esp_sntp_restart();
+    app_event_post_with_timeout(APP_EVENT_SNTP_RESYNC, NULL, 0, pdMS_TO_TICKS(100));
 }
 
 /* ───────────────────────── Public API ────────────────────────────── */
@@ -54,9 +56,9 @@ esp_err_t app_sntp_init(const app_sntp_config_t *config)
     strlcpy(s_timezone,
             (config->timezone && config->timezone[0]) ? config->timezone : "UTC0",
             sizeof(s_timezone));
-    s_sync_interval_h = config->sync_interval_h;
-    if (s_sync_interval_h < 1) {
-        s_sync_interval_h = 1;
+    s_sync_interval = config->sync_interval;
+    if (s_sync_interval < 1) {
+        s_sync_interval = 1;
     }
 
     /* Set timezone */
@@ -64,7 +66,7 @@ esp_err_t app_sntp_init(const app_sntp_config_t *config)
     tzset();
 
     s_initialized = true;
-    ESP_LOGI(TAG, "Initialized (server=%s, interval=%dh)", s_ntp_server, s_sync_interval_h);
+    ESP_LOGI(TAG, "Initialized (server=%s, interval=%dmin)", s_ntp_server, s_sync_interval);
     return ESP_OK;
 }
 
@@ -86,8 +88,8 @@ esp_err_t app_sntp_start(void)
 
     /* Create periodic re-sync timer.
      * Cap at 24h to prevent pdMS_TO_TICKS overflow on high tick-rate configs. */
-    int capped_h = (s_sync_interval_h > 24) ? 24 : s_sync_interval_h;
-    TickType_t period = pdMS_TO_TICKS((uint32_t)capped_h * 3600U * 1000U);
+    int capped = (s_sync_interval > 1440) ? 1440 : s_sync_interval;
+    TickType_t period = pdMS_TO_TICKS((uint32_t)capped * 60U * 1000U);
     s_resync_timer = xTimerCreate("sntp_resync", period, pdTRUE, NULL, resync_timer_cb);
     if (s_resync_timer != NULL) {
         xTimerStart(s_resync_timer, 0);
@@ -107,8 +109,8 @@ esp_err_t app_sntp_stop(void)
     }
 
     if (s_resync_timer != NULL) {
-        xTimerStop(s_resync_timer, 0);
-        xTimerDelete(s_resync_timer, 0);
+        xTimerStop(s_resync_timer, portMAX_DELAY);
+        xTimerDelete(s_resync_timer, portMAX_DELAY);
         s_resync_timer = NULL;
     }
 
@@ -116,4 +118,14 @@ esp_err_t app_sntp_stop(void)
     s_started = false;
     ESP_LOGI(TAG, "SNTP sync stopped");
     return ESP_OK;
+}
+
+void app_sntp_resync(void)
+{
+    if (!s_started) {
+        ESP_LOGW(TAG, "SNTP not started, skip re-sync");
+        return;
+    }
+    ESP_LOGI(TAG, "Re-syncing time");
+    esp_sntp_restart();
 }

@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
-#include "esp_now.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,8 +26,9 @@ extern "C" {
  */
 typedef enum
 {
-    APP_PROTOCOL_SENSOR_ENV = 0x01, /**< BME280 + BH1750: temperature, pressure, humidity, lux */
-    APP_PROTOCOL_SENSOR_IAQ = 0x02, /**< ENS160 + AHT21: temperature, humidity, eCO2, TVOC, AQI */
+    APP_PROTOCOL_SENSOR_ENV      = 0x01, /**< BME280 + BH1750: temperature, pressure, humidity, lux */
+    APP_PROTOCOL_SENSOR_IAQ      = 0x02, /**< ENS160 + AHT21: temperature, humidity, eCO2, TVOC, AQI */
+    APP_PROTOCOL_SENSOR_PRESENCE = 0x03, /**< HLK-LD2412: presence detection, distance, energy, light */
 } app_protocol_sensor_type_t;
 
 /**
@@ -55,6 +55,18 @@ typedef struct __attribute__((packed))
     uint16_t tvoc;        /**< Total VOC in ppb */
     uint8_t  aqi;         /**< AQI-UBA (1=Excellent … 5=Unhealthy) */
 } app_protocol_iaq_data_t;
+
+/**
+ * @brief Binary payload for APP_PROTOCOL_SENSOR_PRESENCE reports.
+ */
+typedef struct __attribute__((packed))
+{
+    uint8_t  target_state;    /**< 0=none, 1=moving, 2=static, 3=both */
+    uint16_t moving_distance; /**< cm */
+    uint8_t  moving_energy;   /**< 0-100 */
+    uint16_t static_distance; /**< cm */
+    uint8_t  static_energy;   /**< 0-100 */
+} app_protocol_presence_data_t;
 
 /* ───────────────────────── Protocol Frame Definition ───────────────────────── */
 

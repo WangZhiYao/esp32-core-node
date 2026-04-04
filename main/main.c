@@ -12,6 +12,11 @@
 #include "app_sntp.h"
 #include "app_protocol.h"
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/timers.h>
+#include <esp_system.h>
+#include <esp_timer.h>
+
 #define TAG "app_main"
 
 #define WIFI_SSID CONFIG_WIFI_SSID
@@ -25,6 +30,17 @@
 
 #define ESPNOW_HEARTBEAT_TIMEOUT_S CONFIG_ESPNOW_HEARTBEAT_TIMEOUT_S
 #define ESPNOW_HEARTBEAT_CHECK_S CONFIG_ESPNOW_HEARTBEAT_CHECK_S
+
+#define STATUS_PRINT_INTERVAL_S 30
+
+static void status_timer_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    ESP_LOGI(TAG, "uptime: %llds, free heap: %lu bytes, min free: %lu bytes",
+             esp_timer_get_time() / 1000000LL,
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)esp_get_minimum_free_heap_size());
+}
 
 /**
  * @brief Parse and publish a DATA_REPORT frame received from a child node
@@ -121,6 +137,46 @@ static void handle_node_data(const app_espnow_node_data_t *evt)
             ESP_LOGI(TAG, "Node %u: published IAQ data to %s", evt->node_id, topic);
         }
     }
+    else if (report->sensor_type == APP_PROTOCOL_SENSOR_PRESENCE)
+    {
+        if (report->data_len < sizeof(app_protocol_presence_data_t))
+        {
+            ESP_LOGW(TAG, "Node %u: PRESENCE payload too short (%u bytes)",
+                     evt->node_id, report->data_len);
+            return;
+        }
+
+        const app_protocol_presence_data_t *presence =
+            (const app_protocol_presence_data_t *)report->data;
+
+        char *topic = "home/iot/presence";
+        char payload[APP_MQTT_PAYLOAD_MAX_LEN];
+
+        snprintf(payload, sizeof(payload),
+                 "{\"node_id\":%u,\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
+                 "\"rssi\":%d,"
+                 "\"target_state\":%u,\"moving_distance\":%u,\"moving_energy\":%u,"
+                 "\"static_distance\":%u,\"static_energy\":%u}",
+                 evt->node_id,
+                 evt->src_addr[0], evt->src_addr[1], evt->src_addr[2],
+                 evt->src_addr[3], evt->src_addr[4], evt->src_addr[5],
+                 evt->rssi,
+                 presence->target_state, presence->moving_distance, presence->moving_energy,
+                 presence->static_distance, presence->static_energy);
+
+        ESP_LOGI(TAG, "Node %u: Publishing to MQTT topic '%s': %s",
+                 evt->node_id, topic, payload);
+
+        int msg_id = app_mqtt_publish(topic, payload, 0, 0);
+        if (msg_id < 0)
+        {
+            ESP_LOGW(TAG, "Node %u: MQTT publish failed", evt->node_id);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Node %u: published PRESENCE data to %s", evt->node_id, topic);
+        }
+    }
     else
     {
         ESP_LOGW(TAG, "Node %u: unknown sensor type 0x%02x",
@@ -168,6 +224,14 @@ static void app_event_handler(void *arg, esp_event_base_t event_base,
         break;
     }
 
+    case APP_EVENT_MQTT_CONNECTED:
+        ESP_LOGI(TAG, "MQTT broker connected");
+        break;
+
+    case APP_EVENT_MQTT_DISCONNECTED:
+        ESP_LOGW(TAG, "MQTT broker disconnected");
+        break;
+
     case APP_EVENT_ESPNOW_NODE_ONLINE:
     {
         app_espnow_node_online_t *evt = (app_espnow_node_online_t *)event_data;
@@ -194,6 +258,10 @@ static void app_event_handler(void *arg, esp_event_base_t event_base,
         handle_node_data(evt);
         break;
     }
+
+    case APP_EVENT_SNTP_RESYNC:
+        app_sntp_resync();
+        break;
 
     default:
         ESP_LOGW(TAG, "Unknown event ID: %" PRId32, event_id);
@@ -262,7 +330,7 @@ void app_main(void)
     app_sntp_config_t sntp_config = {
         .ntp_server = CONFIG_SNTP_SERVER,
         .timezone = CONFIG_SNTP_TIMEZONE,
-        .sync_interval_h = CONFIG_SNTP_SYNC_INTERVAL_H,
+        .sync_interval = CONFIG_SNTP_SYNC_INTERVAL,
     };
 
     err = app_sntp_init(&sntp_config);
@@ -288,4 +356,12 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "Application started successfully");
+
+    /* 8. Start periodic status print */
+    TimerHandle_t status_timer = xTimerCreate(
+        "status", pdMS_TO_TICKS(STATUS_PRINT_INTERVAL_S * 1000),
+        pdTRUE, NULL, status_timer_cb);
+    if (status_timer != NULL) {
+        xTimerStart(status_timer, 0);
+    }
 }
