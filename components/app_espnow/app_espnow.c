@@ -17,6 +17,7 @@
 
 #include <string.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <inttypes.h>
 
 /* ───────────────────────── Constants & Macros ───────────────────────── */
@@ -682,7 +683,7 @@ static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
 static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
                                int data_len, int rssi)
 {
-    if (data_len < (int)(sizeof(app_protocol_header_t) + sizeof(uint16_t)))
+    if (data_len < (int)offsetof(app_protocol_data_report_t, data))
     {
         ESP_LOGW(TAG, "DATA_REPORT too short (%d)", data_len);
         return;
@@ -698,7 +699,7 @@ static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
     }
 
     /* Validate total frame length matches declared payload */
-    int expected_min_len = (int)(sizeof(app_protocol_header_t) + sizeof(uint16_t) + report->data_len);
+    int expected_min_len = (int)(offsetof(app_protocol_data_report_t, data) + report->data_len);
     if (data_len < expected_min_len)
     {
         ESP_LOGW(TAG, "DATA_REPORT truncated: data_len=%d, expected>=%d", data_len, expected_min_len);

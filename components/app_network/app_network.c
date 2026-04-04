@@ -129,7 +129,7 @@ static void schedule_reconnect(void)
     if (s_max_retry_count > 0 && current_retry >= s_max_retry_count)
     {
         ESP_LOGE(TAG, "Max retry count reached (%d), giving up", s_max_retry_count);
-        app_event_post(APP_EVENT_WIFI_STA_DISCONNECTED, NULL, 0);
+        app_event_post_with_timeout(APP_EVENT_WIFI_STA_DISCONNECTED, NULL, 0, pdMS_TO_TICKS(100));
         return;
     }
 
@@ -203,7 +203,7 @@ static void retry_timer_callback(TimerHandle_t xTimer)
         if (s_max_retry_count > 0 && current_retry >= s_max_retry_count)
         {
             ESP_LOGE(TAG, "Max retry count reached (%d), giving up", s_max_retry_count);
-            app_event_post(APP_EVENT_WIFI_STA_DISCONNECTED, NULL, 0);
+            app_event_post_with_timeout(APP_EVENT_WIFI_STA_DISCONNECTED, NULL, 0, pdMS_TO_TICKS(100));
         }
         else
         {
@@ -272,7 +272,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             xTimerStop(s_retry_timer, 0);
         }
 
-        app_event_post(APP_EVENT_WIFI_STA_CONNECTED, NULL, 0);
+        app_event_post_with_timeout(APP_EVENT_WIFI_STA_CONNECTED, NULL, 0, pdMS_TO_TICKS(100));
         break;
     }
 
@@ -288,7 +288,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         if (is_non_retriable_reason(disconn->reason))
         {
             ESP_LOGE(TAG, "Non-retriable reason (%d), will not retry", disconn->reason);
-            app_event_post(APP_EVENT_WIFI_STA_DISCONNECTED, NULL, 0);
+            app_event_post_with_timeout(APP_EVENT_WIFI_STA_DISCONNECTED, NULL, 0, pdMS_TO_TICKS(100));
             break;
         }
 
@@ -319,9 +319,10 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
 
-        app_event_post(APP_EVENT_WIFI_STA_GOT_IP,
+        app_event_post_with_timeout(APP_EVENT_WIFI_STA_GOT_IP,
                        &event->ip_info,
-                       sizeof(esp_netif_ip_info_t));
+                       sizeof(esp_netif_ip_info_t),
+                       pdMS_TO_TICKS(100));
     }
 }
 

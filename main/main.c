@@ -232,6 +232,11 @@ static void app_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGW(TAG, "MQTT broker disconnected");
         break;
 
+    case APP_EVENT_MQTT_DATA:
+    case APP_EVENT_MQTT_PUBLISHED:
+    case APP_EVENT_MQTT_ERROR:
+        break;
+
     case APP_EVENT_ESPNOW_NODE_ONLINE:
     {
         app_espnow_node_online_t *evt = (app_espnow_node_online_t *)event_data;

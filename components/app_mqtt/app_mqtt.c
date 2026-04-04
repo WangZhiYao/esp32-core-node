@@ -141,13 +141,13 @@ static void on_mqtt_client_event(void *arg,
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "Connected to broker");
         set_connected(true);
-        app_event_post(APP_EVENT_MQTT_CONNECTED, NULL, 0);
+        app_event_post_with_timeout(APP_EVENT_MQTT_CONNECTED, NULL, 0, pdMS_TO_TICKS(100));
         break;
 
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "Disconnected from broker");
         set_connected(false);
-        app_event_post(APP_EVENT_MQTT_DISCONNECTED, NULL, 0);
+        app_event_post_with_timeout(APP_EVENT_MQTT_DISCONNECTED, NULL, 0, pdMS_TO_TICKS(100));
         break;
 
     case MQTT_EVENT_DATA:
@@ -202,14 +202,14 @@ static void on_mqtt_client_event(void *arg,
 
         ESP_LOGD(TAG, "Received [%s]: %.*s",
                  mqtt_data.topic, event->data_len, mqtt_data.payload);
-        app_event_post(APP_EVENT_MQTT_DATA, &mqtt_data, sizeof(app_mqtt_data_t));
+        app_event_post_with_timeout(APP_EVENT_MQTT_DATA, &mqtt_data, sizeof(app_mqtt_data_t), pdMS_TO_TICKS(100));
         break;
     }
 
     case MQTT_EVENT_PUBLISHED:
         ESP_LOGD(TAG, "Message published, msg_id=%d", event->msg_id);
-        app_event_post(APP_EVENT_MQTT_PUBLISHED,
-                       &event->msg_id, sizeof(event->msg_id));
+        app_event_post_with_timeout(APP_EVENT_MQTT_PUBLISHED,
+                       &event->msg_id, sizeof(event->msg_id), pdMS_TO_TICKS(100));
         break;
 
     case MQTT_EVENT_SUBSCRIBED:
@@ -233,7 +233,7 @@ static void on_mqtt_client_event(void *arg,
         };
         ESP_LOGE(TAG, "MQTT error: type=%d esp_err=0x%x sock_errno=%d",
                  err_data.type, err_data.esp_err, err_data.sock_errno);
-        app_event_post(APP_EVENT_MQTT_ERROR, &err_data, sizeof(app_mqtt_error_t));
+        app_event_post_with_timeout(APP_EVENT_MQTT_ERROR, &err_data, sizeof(app_mqtt_error_t), pdMS_TO_TICKS(100));
         break;
     }
 
