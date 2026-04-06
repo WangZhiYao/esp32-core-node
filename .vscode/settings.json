@@ -1,11 +1,11 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
-  "idf.espIdfPathWin": "D:\\Espressif\\framework\\v5.5.2\\esp-idf",
+  "idf.espIdfPathWin": "D:\\Espressif\\framework\\v5.5.3\\esp-idf",
   "idf.pythonInstallPath": "D:\\Espressif\\tools\\idf-python\\3.11.2\\python.exe",
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],
-  "idf.portWin": "COM10",
+  "idf.portWin": "COM14",
   "idf.toolsPathWin": "D:\\Espressif",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
@@ -16,5 +16,5 @@
     "--query-driver=**",
     "--compile-commands-dir=d:\\Projects\\esp32\\s3\\esp32-core-node\\build"
   ],
-  "idf.flashType": "JTAG"
+  "idf.flashType": "UART"
 }

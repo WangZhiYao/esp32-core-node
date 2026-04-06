@@ -34,6 +34,8 @@ typedef enum
     APP_EVENT_ESPNOW_NODE_DATA,    /*!< Child node data report, event_data: app_espnow_node_data_t* */
     /* ── SNTP Events ── */
     APP_EVENT_SNTP_RESYNC,         /*!< Periodic SNTP re-sync request (no event_data) */
+    /* ── Weather Events ── */
+    APP_EVENT_WEATHER_UPDATED,     /*!< Weather data refreshed (no event_data) */
 } app_event_id_t;
 
 /**

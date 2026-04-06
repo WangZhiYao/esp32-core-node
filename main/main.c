@@ -10,12 +10,12 @@
 #include "app_mqtt.h"
 #include "app_espnow.h"
 #include "app_sntp.h"
+#include "app_weather.h"
 #include "app_protocol.h"
+#include "app_display.h"
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/timers.h>
+#include <driver/spi_master.h>
 #include <esp_system.h>
-#include <esp_timer.h>
 
 #define TAG "app_main"
 
@@ -30,17 +30,6 @@
 
 #define ESPNOW_HEARTBEAT_TIMEOUT_S CONFIG_ESPNOW_HEARTBEAT_TIMEOUT_S
 #define ESPNOW_HEARTBEAT_CHECK_S CONFIG_ESPNOW_HEARTBEAT_CHECK_S
-
-#define STATUS_PRINT_INTERVAL_S 30
-
-static void status_timer_cb(TimerHandle_t timer)
-{
-    (void)timer;
-    ESP_LOGI(TAG, "uptime: %llds, free heap: %lu bytes, min free: %lu bytes",
-             esp_timer_get_time() / 1000000LL,
-             (unsigned long)esp_get_free_heap_size(),
-             (unsigned long)esp_get_minimum_free_heap_size());
-}
 
 /**
  * @brief Parse and publish a DATA_REPORT frame received from a child node
@@ -268,6 +257,10 @@ static void app_event_handler(void *arg, esp_event_base_t event_base,
         app_sntp_resync();
         break;
 
+    case APP_EVENT_WEATHER_UPDATED:
+        ESP_LOGI(TAG, "Weather data updated");
+        break;
+
     default:
         ESP_LOGW(TAG, "Unknown event ID: %" PRId32, event_id);
         break;
@@ -345,6 +338,14 @@ void app_main(void)
         return;
     }
 
+    /* 6.5 Initialize Weather Module */
+    err = app_weather_init();
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Weather init failed: %s (non-critical)", esp_err_to_name(err));
+        /* Weather is non-critical, continue without it */
+    }
+
     /* 7. Initialize ESP-NOW Gateway Module */
     const char *pmk_str = CONFIG_ESPNOW_PMK;
     app_espnow_config_t espnow_config = {
@@ -362,11 +363,23 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Application started successfully");
 
-    /* 8. Start periodic status print */
-    TimerHandle_t status_timer = xTimerCreate(
-        "status", pdMS_TO_TICKS(STATUS_PRINT_INTERVAL_S * 1000),
-        pdTRUE, NULL, status_timer_cb);
-    if (status_timer != NULL) {
-        xTimerStart(status_timer, 0);
+    /* 8. Initialize E-Paper Display */
+    app_display_config_t display_config = {
+        .spi_host = SPI2_HOST,
+        .pin_mosi = CONFIG_DISPLAY_PIN_MOSI,
+        .pin_clk = CONFIG_DISPLAY_PIN_CLK,
+        .pin_cs = CONFIG_DISPLAY_PIN_CS,
+        .pin_dc = CONFIG_DISPLAY_PIN_DC,
+        .pin_rst = CONFIG_DISPLAY_PIN_RST,
+        .pin_busy = CONFIG_DISPLAY_PIN_BUSY,
+        .pin_pwr = CONFIG_DISPLAY_PIN_PWR,
+        .refresh_interval_s = CONFIG_DISPLAY_REFRESH_INTERVAL,
+    };
+
+    err = app_display_init(&display_config);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to initialize display: %s", esp_err_to_name(err));
+        /* Display is non-critical, continue without it */
     }
 }
