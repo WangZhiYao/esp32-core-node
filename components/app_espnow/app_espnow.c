@@ -427,8 +427,7 @@ static esp_err_t ensure_unicast_peer(const uint8_t *mac)
         peer.encrypt = false;
         esp_err_t err = esp_now_add_peer(&peer);
         if (err == ESP_ERR_ESPNOW_FULL) {
-            ESP_LOGE(TAG, "ESP-NOW peer list full! Cannot add " MACSTR, MAC2STR(mac));
-            /* TODO: Implement LRU peer removal if supporting >20 nodes */
+            ESP_LOGW(TAG, "ESP-NOW peer list full, cannot add " MACSTR, MAC2STR(mac));
         }
         return err;
     }
@@ -806,6 +805,13 @@ static void espnow_rx_task(void *arg)
         if (xQueueReceive(s_rx_queue, &item, portMAX_DELAY) != pdTRUE)
             continue;
 
+        /* Shutdown sentinel: data_len == 0 means exit */
+        if (item.data_len == 0)
+        {
+            ESP_LOGI(TAG, "RX task received shutdown sentinel, exiting");
+            break;
+        }
+
         const app_protocol_header_t *header = (const app_protocol_header_t *)item.data;
 
         switch ((app_protocol_msg_type_t)header->type)
@@ -828,6 +834,9 @@ static void espnow_rx_task(void *arg)
             break;
         }
     }
+
+    s_rx_task = NULL;
+    vTaskDelete(NULL);
 }
 
 /**
@@ -956,8 +965,16 @@ static void app_espnow_init_cleanup(bool stop_send_task, bool unregister_handler
         app_event_handler_unregister(APP_EVENT_ESPNOW_NODE_ONLINE, app_espnow_event_handler);
     if (s_rx_task != NULL)
     {
-        vTaskDelete(s_rx_task);
-        s_rx_task = NULL;
+        rx_item_t rx_sentinel = {0}; /* data_len == 0 */
+        if (s_rx_queue != NULL) {
+            xQueueSend(s_rx_queue, &rx_sentinel, portMAX_DELAY);
+            for (int i = 0; i < 50 && s_rx_task != NULL; i++)
+                vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (s_rx_task != NULL) {
+            vTaskDelete(s_rx_task);
+            s_rx_task = NULL;
+        }
     }
     if (stop_send_task && s_send_task != NULL)
     {
@@ -1189,6 +1206,10 @@ esp_err_t app_espnow_deinit(void)
         s_heartbeat_timer = NULL;
     }
 
+    /* Unregister callbacks first so recv_cb cannot fire and enqueue new items */
+    esp_now_unregister_recv_cb();
+    esp_now_unregister_send_cb();
+
     /* Gracefully stop send task by sending a shutdown sentinel */
     if (s_send_task != NULL && s_send_queue != NULL)
     {
@@ -1209,17 +1230,25 @@ esp_err_t app_espnow_deinit(void)
         }
     }
 
-    /* Stop RX task */
-    if (s_rx_task != NULL)
+    /* Gracefully stop RX task by sending a shutdown sentinel */
+    if (s_rx_task != NULL && s_rx_queue != NULL)
     {
-        vTaskDelete(s_rx_task);
-        s_rx_task = NULL;
+        rx_item_t sentinel = {0}; /* data_len == 0 */
+        xQueueSend(s_rx_queue, &sentinel, portMAX_DELAY);
+
+        for (int i = 0; i < 50 && s_rx_task != NULL; i++)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+
+        if (s_rx_task != NULL)
+        {
+            ESP_LOGW(TAG, "RX task did not exit gracefully, force deleting");
+            vTaskDelete(s_rx_task);
+            s_rx_task = NULL;
+        }
     }
 
-    /* Unregister callbacks and deinit ESP-NOW before deleting queues,
-     * so recv_cb cannot fire and access freed queue handles. */
-    esp_now_unregister_recv_cb();
-    esp_now_unregister_send_cb();
     esp_now_deinit();
 
     if (s_send_queue != NULL)

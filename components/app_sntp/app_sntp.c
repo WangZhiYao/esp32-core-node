@@ -88,7 +88,11 @@ esp_err_t app_sntp_start(void)
 
     /* Create periodic re-sync timer.
      * Cap at 24h to prevent pdMS_TO_TICKS overflow on high tick-rate configs. */
-    int capped = (s_sync_interval > 1440) ? 1440 : s_sync_interval;
+    int capped = s_sync_interval;
+    if (capped > 1440) {
+        ESP_LOGW(TAG, "Sync interval %d min exceeds max 1440, capping to 1440", s_sync_interval);
+        capped = 1440;
+    }
     TickType_t period = pdMS_TO_TICKS((uint32_t)capped * 60U * 1000U);
     s_resync_timer = xTimerCreate("sntp_resync", period, pdTRUE, NULL, resync_timer_cb);
     if (s_resync_timer != NULL) {

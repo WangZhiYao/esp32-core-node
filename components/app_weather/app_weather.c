@@ -13,6 +13,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <stdatomic.h>
+
 #define TAG "app_weather"
 
 /* ─── Kconfig ─── */
@@ -31,7 +33,7 @@ static app_weather_data_t s_cache;
 static SemaphoreHandle_t  s_mutex;
 static esp_timer_handle_t s_timer;
 static TaskHandle_t       s_task;
-static bool               s_wifi_ready;
+static atomic_bool        s_wifi_ready;
 
 /* ─── Gzip decompression ─── */
 
@@ -420,12 +422,24 @@ esp_err_t app_weather_init(void)
     BaseType_t xret = xTaskCreate(weather_task, "weather", 12288, NULL, 4, &s_task);
     if (xret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create weather task");
+        esp_timer_delete(s_timer);
+        s_timer = NULL;
+        vSemaphoreDelete(s_mutex);
+        s_mutex = NULL;
         return ESP_ERR_NO_MEM;
     }
 
     /* Listen for WiFi events on the app event bus */
     err = app_event_handler_register(ESP_EVENT_ANY_ID, weather_event_handler, NULL);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        vTaskDelete(s_task);
+        s_task = NULL;
+        esp_timer_delete(s_timer);
+        s_timer = NULL;
+        vSemaphoreDelete(s_mutex);
+        s_mutex = NULL;
+        return err;
+    }
 
     ESP_LOGI(TAG, "Initialized (location=%s, refresh=%dmin)", WEATHER_LOCATION, WEATHER_REFRESH_MIN);
     return ESP_OK;

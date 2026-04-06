@@ -36,7 +36,7 @@
  */
 static void handle_node_data(const app_espnow_node_data_t *evt)
 {
-    ESP_LOGI(TAG, "stack hwm: %u", uxTaskGetStackHighWaterMark(NULL));
+    ESP_LOGD(TAG, "stack hwm: %u", uxTaskGetStackHighWaterMark(NULL));
     if (evt->data_len < offsetof(app_protocol_data_report_t, data))
     {
         ESP_LOGW(TAG, "Node %u: data too short (%u bytes)", evt->node_id, evt->data_len);
@@ -348,8 +348,16 @@ void app_main(void)
 
     /* 7. Initialize ESP-NOW Gateway Module */
     const char *pmk_str = CONFIG_ESPNOW_PMK;
+    const uint8_t *pmk_ptr = NULL;
+    if (pmk_str[0] != '\0') {
+        if (strlen(pmk_str) != 16) {
+            ESP_LOGE(TAG, "ESP-NOW PMK must be exactly 16 bytes (got %u)", (unsigned)strlen(pmk_str));
+        } else {
+            pmk_ptr = (const uint8_t *)pmk_str;
+        }
+    }
     app_espnow_config_t espnow_config = {
-        .pmk = (pmk_str[0] != '\0') ? (const uint8_t *)pmk_str : NULL,
+        .pmk = pmk_ptr,
         .heartbeat_timeout_s = ESPNOW_HEARTBEAT_TIMEOUT_S,
         .heartbeat_check_s = ESPNOW_HEARTBEAT_CHECK_S,
     };

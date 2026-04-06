@@ -16,6 +16,7 @@
 
 static epd_pin_config_t s_pins;
 static spi_device_handle_t s_spi = NULL;
+static bool s_bus_initialized = false;
 
 /* ───────────────────────── Low-level Helpers ───────────────────────── */
 
@@ -311,6 +312,7 @@ esp_err_t epd_init(const epd_pin_config_t *pins)
     }
 
     ESP_LOGI(TAG, "EPD 4in0e initialized (600x400, 6-color)");
+    s_bus_initialized = true;
     return ESP_OK;
 }
 
@@ -365,7 +367,10 @@ void epd_deinit(void)
         spi_bus_remove_device(s_spi);
         s_spi = NULL;
     }
-    spi_bus_free(s_pins.spi_host);
+    if (s_bus_initialized) {
+        spi_bus_free(s_pins.spi_host);
+        s_bus_initialized = false;
+    }
 
     if (s_pins.pin_pwr >= 0) {
         epd_gpio_set(s_pins.pin_pwr, 0);

@@ -11,6 +11,7 @@
 
 #include <esp_log.h>
 #include <esp_system.h>
+#include <cJSON.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -18,6 +19,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 static const char *TAG = "app_display";
 #define DISPLAY_MUTEX_TIMEOUT_MS   50
@@ -69,6 +71,7 @@ static bool               s_node_online[APP_ESPNOW_MAX_NODES];
 static uint8_t           *s_image_buf = NULL;
 static TaskHandle_t       s_display_task = NULL;
 static SemaphoreHandle_t  s_mutex = NULL;
+static atomic_bool        s_exit_requested = false;
 static int                s_refresh_interval_s = 30;
 static bool               s_presence_active = false;
 static bool               s_force_refresh = false;
@@ -213,7 +216,7 @@ static void draw_dashboard(uint8_t *buf)
     if (snapshot.env.valid) {
         snprintf(text, sizeof(text), "Temp  %.1f", snapshot.env.data.temperature);
         Paint_DrawString_EN(10, y, text, &Font16, EPD_COLOR_BLACK, EPD_COLOR_WHITE);
-        draw_degree_c(15 + (int)strlen(text) * 11, y, &Font16, EPD_COLOR_BLACK, EPD_COLOR_WHITE);
+        draw_degree_c(20 + (int)strlen(text) * 11, y, &Font16, EPD_COLOR_BLACK, EPD_COLOR_WHITE);
         y += 25;
 
         snprintf(text, sizeof(text), "Humi  %.1f %%", snapshot.env.data.humidity);
@@ -247,7 +250,7 @@ static void draw_dashboard(uint8_t *buf)
     if (snapshot.iaq.valid) {
         snprintf(text, sizeof(text), "Temp  %.1f", snapshot.iaq.data.temperature);
         Paint_DrawString_EN(310, y, text, &Font16, EPD_COLOR_BLACK, EPD_COLOR_WHITE);
-        draw_degree_c(315 + (int)strlen(text) * 11, y, &Font16, EPD_COLOR_BLACK, EPD_COLOR_WHITE);
+        draw_degree_c(320 + (int)strlen(text) * 11, y, &Font16, EPD_COLOR_BLACK, EPD_COLOR_WHITE);
         y += 25;
 
         snprintf(text, sizeof(text), "Humi  %.1f %%", snapshot.iaq.data.humidity);
@@ -374,6 +377,13 @@ static void display_task(void *arg)
     ESP_LOGI(TAG, "Display task started");
 
     for (;;) {
+        if (atomic_load(&s_exit_requested)) {
+            ESP_LOGI(TAG, "Display task exiting");
+            s_display_task = NULL;
+            vTaskDelete(NULL);
+            return;
+        }
+
         display_mode_t mode = DISPLAY_MODE_DASHBOARD;
         int refresh_interval_s = 30;
         bool presence_active = false;
@@ -613,18 +623,24 @@ static void display_event_handler(void *arg, esp_event_base_t event_base,
         const app_mqtt_data_t *mqtt = (const app_mqtt_data_t *)event_data;
 
         if (strcmp(mqtt->topic, DISPLAY_CMD_TOPIC) == 0) {
-            /* Parse mode command: look for "mode" field in JSON payload */
+            /* Parse command JSON payload using cJSON */
             bool refresh_now = false;
-            const char *mode_str = strstr(mqtt->payload, "\"mode\"");
-            if (mode_str != NULL) {
-                if (strstr(mode_str, "\"dashboard\"") != NULL) {
+            cJSON *root = cJSON_Parse(mqtt->payload);
+            if (root == NULL) {
+                ESP_LOGW(TAG, "Invalid JSON in display command");
+                break;
+            }
+
+            cJSON *mode_item = cJSON_GetObjectItem(root, "mode");
+            if (cJSON_IsString(mode_item) && mode_item->valuestring != NULL) {
+                if (strcmp(mode_item->valuestring, "dashboard") == 0) {
                     ESP_LOGI(TAG, "Switching to DASHBOARD mode");
                     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(DISPLAY_MUTEX_TIMEOUT_MS)) == pdTRUE) {
                         s_mode = DISPLAY_MODE_DASHBOARD;
                         xSemaphoreGive(s_mutex);
                         refresh_now = true;
                     }
-                } else if (strstr(mode_str, "\"image\"") != NULL) {
+                } else if (strcmp(mode_item->valuestring, "image") == 0) {
                     ESP_LOGI(TAG, "Switching to IMAGE mode");
                     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(DISPLAY_MUTEX_TIMEOUT_MS)) == pdTRUE) {
                         s_mode = DISPLAY_MODE_IMAGE;
@@ -633,24 +649,22 @@ static void display_event_handler(void *arg, esp_event_base_t event_base,
                 }
             }
 
-            /* Parse refresh interval: {"refresh":N} where N is seconds */
-            const char *refresh_str = strstr(mqtt->payload, "\"refresh\"");
-            if (refresh_str != NULL) {
-                const char *colon = strchr(refresh_str, ':');
-                if (colon != NULL) {
-                    int val = atoi(colon + 1);
-                    if (val >= 30 && val <= 3600) {
-                        if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(DISPLAY_MUTEX_TIMEOUT_MS)) == pdTRUE) {
-                            s_refresh_interval_s = val;
-                            refresh_now = (s_mode == DISPLAY_MODE_DASHBOARD);
-                            xSemaphoreGive(s_mutex);
-                            ESP_LOGI(TAG, "Refresh interval set to %d seconds", val);
-                        }
-                    } else {
-                        ESP_LOGW(TAG, "Refresh interval out of range (30-3600): %d", val);
+            cJSON *refresh_item = cJSON_GetObjectItem(root, "refresh");
+            if (cJSON_IsNumber(refresh_item)) {
+                int val = refresh_item->valueint;
+                if (val >= 30 && val <= 3600) {
+                    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(DISPLAY_MUTEX_TIMEOUT_MS)) == pdTRUE) {
+                        s_refresh_interval_s = val;
+                        refresh_now = (s_mode == DISPLAY_MODE_DASHBOARD);
+                        xSemaphoreGive(s_mutex);
+                        ESP_LOGI(TAG, "Refresh interval set to %d seconds", val);
                     }
+                } else {
+                    ESP_LOGW(TAG, "Refresh interval out of range (30-3600): %d", val);
                 }
             }
+
+            cJSON_Delete(root);
 
             if (refresh_now && s_display_task != NULL) {
                 xTaskNotifyGive(s_display_task);
@@ -782,9 +796,22 @@ esp_err_t app_display_stop(void)
     /* Unregister event handler */
     app_event_handler_unregister(ESP_EVENT_ANY_ID, display_event_handler);
 
-    /* Delete display task */
-    vTaskDelete(s_display_task);
-    s_display_task = NULL;
+    /* Request graceful exit and wake the task */
+    atomic_store(&s_exit_requested, true);
+    xTaskNotifyGive(s_display_task);
+
+    /* Poll-wait for task to self-delete (500ms intervals, 5s max) */
+    for (int i = 0; i < 10 && s_display_task != NULL; i++) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    if (s_display_task != NULL) {
+        ESP_LOGW(TAG, "Display task did not exit gracefully, force deleting");
+        vTaskDelete(s_display_task);
+        s_display_task = NULL;
+    }
+
+    atomic_store(&s_exit_requested, false);
 
     /* Free image buffer if allocated */
     if (s_image_buf != NULL) {
