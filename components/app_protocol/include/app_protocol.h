@@ -145,6 +145,71 @@ typedef struct __attribute__((packed))
     uint8_t  data[APP_PROTOCOL_USER_DATA_MAX_LEN]; /**< Binary sensor payload */
 } app_protocol_data_report_t;
 
+/* ───────────────────────── Protocol API Functions ───────────────────────── */
+
+/**
+ * @brief Get the minimum frame size for a given message type
+ *
+ * @return Minimum size in bytes, or -1 for unknown types
+ */
+int app_protocol_min_frame_size(app_protocol_msg_type_t type);
+
+/**
+ * @brief Validate a received frame
+ *
+ * Checks header, message type, minimum length, and for DATA_REPORT
+ * additionally validates payload length consistency.
+ *
+ * @param data     Raw frame bytes
+ * @param data_len Total frame length
+ * @param out_type If non-NULL, receives the parsed message type on success
+ * @return ESP_OK, ESP_ERR_INVALID_SIZE, or ESP_ERR_INVALID_ARG
+ */
+esp_err_t app_protocol_validate(const void *data, int data_len,
+                                app_protocol_msg_type_t *out_type);
+
+/**
+ * @brief Build a REGISTER_RESP frame
+ * @return Frame size in bytes, or 0 on error
+ */
+size_t app_protocol_build_register_resp(void *buf, size_t buf_size,
+                                        uint8_t assigned_id, uint8_t channel,
+                                        uint16_t seq);
+
+/**
+ * @brief Build a HEARTBEAT_ACK frame
+ * @return Frame size in bytes, or 0 on error
+ */
+size_t app_protocol_build_heartbeat_ack(void *buf, size_t buf_size,
+                                        uint8_t node_id, uint16_t seq);
+
+/**
+ * @brief Parse and validate a REGISTER_REQ frame (zero-copy)
+ * @param[out] out Receives a const pointer into the original buffer
+ * @return ESP_OK on success
+ */
+esp_err_t app_protocol_parse_register_req(const void *data, int data_len,
+                                          const app_protocol_register_req_t **out);
+
+/**
+ * @brief Parse and validate a HEARTBEAT frame (zero-copy)
+ * @param[out] out Receives a const pointer into the original buffer
+ * @return ESP_OK on success
+ */
+esp_err_t app_protocol_parse_heartbeat(const void *data, int data_len,
+                                       const app_protocol_heartbeat_t **out);
+
+/**
+ * @brief Parse and validate a DATA_REPORT frame (zero-copy)
+ *
+ * Validates header, data_len field, and total frame size consistency.
+ *
+ * @param[out] out Receives a const pointer into the original buffer
+ * @return ESP_OK on success
+ */
+esp_err_t app_protocol_parse_data_report(const void *data, int data_len,
+                                         const app_protocol_data_report_t **out);
+
 #ifdef __cplusplus
 }
 #endif

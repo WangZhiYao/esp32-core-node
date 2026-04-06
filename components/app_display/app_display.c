@@ -472,13 +472,10 @@ static void display_event_handler(void *arg, esp_event_base_t event_base,
         const app_espnow_node_data_t *evt = (const app_espnow_node_data_t *)event_data;
         bool notify_refresh = false;
 
-        /* Validate minimum frame length */
-        if (evt->data_len < offsetof(app_protocol_data_report_t, data)) {
+        const app_protocol_data_report_t *report;
+        if (app_protocol_parse_data_report(evt->data, evt->data_len, &report) != ESP_OK) {
             break;
         }
-
-        const app_protocol_data_report_t *report =
-            (const app_protocol_data_report_t *)evt->data;
 
         if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(DISPLAY_MUTEX_TIMEOUT_MS)) != pdTRUE) {
             ESP_LOGW(TAG, "Mutex timeout in event handler");

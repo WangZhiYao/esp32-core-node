@@ -524,19 +524,18 @@ static void send_register_resp(const uint8_t *dst_mac, uint8_t assigned_id, uint
     wifi_second_chan_t second_ch = WIFI_SECOND_CHAN_NONE;
     esp_wifi_get_channel(&primary_ch, &second_ch);
 
-    app_protocol_register_resp_t resp = {
-        .header = {
-            .type = APP_PROTOCOL_MSG_REGISTER_RESP,
-            .node_id = 0,
-            .seq = seq,
-        },
-        .assigned_id = assigned_id,
-        .channel = primary_ch,
-    };
+    uint8_t buf[sizeof(app_protocol_register_resp_t)];
+    size_t len = app_protocol_build_register_resp(buf, sizeof(buf),
+                                                  assigned_id, primary_ch, seq);
+    if (len == 0)
+    {
+        ESP_LOGE(TAG, "Failed to build REGISTER_RESP");
+        return;
+    }
 
     ESP_LOGI(TAG, "Queuing REGISTER_RESP to " MACSTR " assigned_id=%u channel=%u",
              MAC2STR(dst_mac), assigned_id, primary_ch);
-    enqueue_send(dst_mac, &resp, sizeof(resp), pdMS_TO_TICKS(50));
+    enqueue_send(dst_mac, buf, (uint16_t)len, pdMS_TO_TICKS(50));
 }
 
 /**
@@ -544,17 +543,17 @@ static void send_register_resp(const uint8_t *dst_mac, uint8_t assigned_id, uint
  */
 static void send_heartbeat_ack(const uint8_t *dst_mac, uint8_t node_id, uint16_t seq)
 {
-    app_protocol_heartbeat_ack_t ack = {
-        .header = {
-            .type = APP_PROTOCOL_MSG_HEARTBEAT_ACK,
-            .node_id = node_id,
-            .seq = seq,
-        },
-    };
+    uint8_t buf[sizeof(app_protocol_heartbeat_ack_t)];
+    size_t len = app_protocol_build_heartbeat_ack(buf, sizeof(buf), node_id, seq);
+    if (len == 0)
+    {
+        ESP_LOGE(TAG, "Failed to build HEARTBEAT_ACK");
+        return;
+    }
 
     ESP_LOGD(TAG, "Queuing HEARTBEAT_ACK to " MACSTR " node_id=%u",
              MAC2STR(dst_mac), node_id);
-    enqueue_send(dst_mac, &ack, sizeof(ack), 0);
+    enqueue_send(dst_mac, buf, (uint16_t)len, 0);
 }
 
 /* ───────────────────── Protocol Frame Handling ───────────────────── */
@@ -565,13 +564,12 @@ static void send_heartbeat_ack(const uint8_t *dst_mac, uint8_t node_id, uint16_t
 static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
                                 int data_len, int rssi)
 {
-    if (data_len < (int)sizeof(app_protocol_register_req_t))
+    const app_protocol_register_req_t *req;
+    if (app_protocol_parse_register_req(data, data_len, &req) != ESP_OK)
     {
-        ESP_LOGW(TAG, "REGISTER_REQ too short (%d)", data_len);
+        ESP_LOGW(TAG, "Invalid REGISTER_REQ (len=%d)", data_len);
         return;
     }
-
-    const app_protocol_register_req_t *req = (const app_protocol_register_req_t *)data;
 
     ESP_LOGI(TAG, "REGISTER_REQ from " MACSTR " type=%u fw=%u",
              MAC2STR(src_mac), req->device_type, req->fw_version);
@@ -628,13 +626,12 @@ static void handle_register_req(const uint8_t *src_mac, const uint8_t *data,
 static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
                              int data_len, int rssi)
 {
-    if (data_len < (int)sizeof(app_protocol_heartbeat_t))
+    const app_protocol_heartbeat_t *hb;
+    if (app_protocol_parse_heartbeat(data, data_len, &hb) != ESP_OK)
     {
-        ESP_LOGW(TAG, "HEARTBEAT too short (%d)", data_len);
+        ESP_LOGW(TAG, "Invalid HEARTBEAT (len=%d)", data_len);
         return;
     }
-
-    const app_protocol_heartbeat_t *hb = (const app_protocol_heartbeat_t *)data;
     uint8_t node_id = hb->header.node_id;
 
     if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE)
@@ -682,28 +679,14 @@ static void handle_heartbeat(const uint8_t *src_mac, const uint8_t *data,
 static void handle_data_report(const uint8_t *src_mac, const uint8_t *data,
                                int data_len, int rssi)
 {
-    if (data_len < (int)offsetof(app_protocol_data_report_t, data))
+    const app_protocol_data_report_t *report;
+    if (app_protocol_parse_data_report(data, data_len, &report) != ESP_OK)
     {
-        ESP_LOGW(TAG, "DATA_REPORT too short (%d)", data_len);
+        ESP_LOGW(TAG, "Invalid DATA_REPORT (len=%d)", data_len);
         return;
     }
 
-    const app_protocol_data_report_t *report = (const app_protocol_data_report_t *)data;
     uint8_t node_id = report->header.node_id;
-
-    if (report->data_len > APP_PROTOCOL_USER_DATA_MAX_LEN)
-    {
-        ESP_LOGW(TAG, "DATA_REPORT data_len too large (%u)", report->data_len);
-        return;
-    }
-
-    /* Validate total frame length matches declared payload */
-    int expected_min_len = (int)(offsetof(app_protocol_data_report_t, data) + report->data_len);
-    if (data_len < expected_min_len)
-    {
-        ESP_LOGW(TAG, "DATA_REPORT truncated: data_len=%d, expected>=%d", data_len, expected_min_len);
-        return;
-    }
 
     if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE)
     {
