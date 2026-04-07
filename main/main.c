@@ -13,6 +13,7 @@
 #include "app_weather.h"
 #include "app_protocol.h"
 #include "app_display.h"
+#include "app_web.h"
 
 #include <driver/spi_master.h>
 #include <esp_system.h>
@@ -210,6 +211,7 @@ static void app_event_handler(void *arg, esp_event_base_t event_base,
         esp_netif_ip_info_t *ip_info = (esp_netif_ip_info_t *)event_data;
         ESP_LOGI(TAG, "WiFi station got IP: " IPSTR, IP2STR(&ip_info->ip));
         app_sntp_start();
+        app_web_init();
         break;
     }
 
@@ -307,6 +309,29 @@ void app_main(void)
     {
         ESP_LOGE(TAG, "Failed to initialize network: %s", esp_err_to_name(err));
         return;
+    }
+
+    /* 4.5 Start AP Mode for Web Configuration Access */
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    char ap_ssid[32];
+    snprintf(ap_ssid, sizeof(ap_ssid), "%s-%02X%02X",
+             CONFIG_WEB_AP_SSID_PREFIX, mac[4], mac[5]);
+    app_network_ap_config_t ap_config = {
+        .ssid = ap_ssid,
+        .password = CONFIG_WEB_AP_PASSWORD,
+        .channel = 0,
+        .max_conn = 4,
+    };
+    err = app_network_start_ap(&ap_config);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "AP mode start failed: %s (non-critical)", esp_err_to_name(err));
+    }
+    else
+    {
+        /* Start web server immediately for AP mode access */
+        app_web_init();
     }
 
     app_mqtt_config_t mqtt_config = {

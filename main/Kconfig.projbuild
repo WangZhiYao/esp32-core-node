@@ -217,4 +217,64 @@ menu "Project Configuration"
 
     endmenu
 
+    menu "Web Server Configuration"
+
+        config WEB_SERVER_ENABLE
+            bool "Enable Web Server"
+            default y
+            help
+              Enable the embedded web server for device monitoring and configuration.
+
+        config WEB_SERVER_PORT
+            int "HTTP Server Port"
+            default 80
+            range 1 65535
+            depends on WEB_SERVER_ENABLE
+            help
+              Port number for the HTTP server.
+
+        config WEB_SERVER_MAX_CONN
+            int "Maximum Concurrent Connections"
+            default 4
+            range 1 8
+            depends on WEB_SERVER_ENABLE
+            help
+              Maximum number of simultaneous HTTP connections.
+
+        config WEB_ADMIN_USERNAME
+            string "Admin Username"
+            default "admin"
+            depends on WEB_SERVER_ENABLE
+            help
+              Default username for web interface authentication.
+              Can be changed at runtime via the web interface.
+
+        config WEB_ADMIN_PASSWORD
+            string "Admin Password"
+            default "admin"
+            depends on WEB_SERVER_ENABLE
+            help
+              Default password for web interface authentication.
+              Can be changed at runtime via the web interface.
+              It is strongly recommended to change this from the default.
+
+        config WEB_AP_SSID_PREFIX
+            string "AP Mode SSID Prefix"
+            default "ESP32-Gateway"
+            depends on WEB_SERVER_ENABLE
+            help
+              SSID prefix for AP mode. The last 4 hex digits of the MAC address
+              will be appended (e.g., ESP32-Gateway-A1B2).
+
+        config WEB_AP_PASSWORD
+            string "AP Mode Password"
+            default "12345678"
+            depends on WEB_SERVER_ENABLE
+            help
+              Password for the AP mode WiFi network.
+              Must be at least 8 characters.
+
+    endmenu
+
+
 endmenu

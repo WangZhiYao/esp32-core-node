@@ -63,6 +63,12 @@ static esp_event_handler_instance_t s_ip_handler_instance = NULL;
 /** Default STA netif pointer, used for destruction during deinit */
 static esp_netif_t *s_sta_netif = NULL;
 
+/** Default AP netif pointer */
+static esp_netif_t *s_ap_netif = NULL;
+
+/** AP mode active flag */
+static bool s_ap_active = false;
+
 /* ───────────────────── Internal Helper Functions ───────────────────── */
 
 /**
@@ -538,6 +544,87 @@ cleanup_timer:
     return err;
 }
 
+esp_err_t app_network_start_ap(const app_network_ap_config_t *config)
+{
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "Network not initialized, call app_network_init() first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (config == NULL || config->ssid == NULL || strlen(config->ssid) == 0) {
+        ESP_LOGE(TAG, "AP SSID is required");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_ap_active) {
+        ESP_LOGW(TAG, "AP already active");
+        return ESP_OK;
+    }
+
+    /* Create AP netif */
+    s_ap_netif = esp_netif_create_default_wifi_ap();
+    if (s_ap_netif == NULL) {
+        ESP_LOGE(TAG, "Failed to create AP netif");
+        return ESP_FAIL;
+    }
+
+    /* Switch to APSTA mode */
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set APSTA mode: %s", esp_err_to_name(err));
+        esp_netif_destroy_default_wifi(s_ap_netif);
+        s_ap_netif = NULL;
+        return err;
+    }
+
+    /* Configure AP */
+    wifi_config_t ap_config;
+    memset(&ap_config, 0, sizeof(ap_config));
+    strncpy((char *)ap_config.ap.ssid, config->ssid, sizeof(ap_config.ap.ssid) - 1);
+    ap_config.ap.ssid_len = strlen(config->ssid);
+    ap_config.ap.channel = config->channel > 0 ? config->channel : 1;
+    ap_config.ap.max_connection = config->max_conn > 0 ? config->max_conn : 4;
+
+    if (config->password && strlen(config->password) >= WPA2_PASSWORD_MIN_LEN) {
+        strncpy((char *)ap_config.ap.password, config->password, sizeof(ap_config.ap.password) - 1);
+        ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    } else {
+        ap_config.ap.authmode = WIFI_AUTH_OPEN;
+    }
+    ap_config.ap.pmf_cfg.required = false;
+
+    err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set AP config: %s", esp_err_to_name(err));
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_netif_destroy_default_wifi(s_ap_netif);
+        s_ap_netif = NULL;
+        return err;
+    }
+
+    s_ap_active = true;
+    ESP_LOGI(TAG, "AP started (SSID: %s)", config->ssid);
+    return ESP_OK;
+}
+
+esp_err_t app_network_stop_ap(void)
+{
+    if (!s_ap_active) {
+        return ESP_OK;
+    }
+
+    esp_wifi_set_mode(WIFI_MODE_STA);
+
+    if (s_ap_netif) {
+        esp_netif_destroy_default_wifi(s_ap_netif);
+        s_ap_netif = NULL;
+    }
+
+    s_ap_active = false;
+    ESP_LOGI(TAG, "AP stopped");
+    return ESP_OK;
+}
+
 esp_err_t app_network_deinit(void)
 {
     if (!s_initialized)
@@ -586,6 +673,14 @@ esp_err_t app_network_deinit(void)
     atomic_store(&s_retry_num, 0);
     atomic_store(&s_connect_in_progress, false);
     s_max_retry_count = 5;
+    s_ap_active = false;
+
+    /* Destroy AP Network Interface if active */
+    if (s_ap_netif != NULL)
+    {
+        esp_netif_destroy_default_wifi(s_ap_netif);
+        s_ap_netif = NULL;
+    }
 
     s_initialized = false;
     ESP_LOGI(TAG, "WiFi STA deinitialized");

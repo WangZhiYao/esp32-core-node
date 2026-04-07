@@ -15,6 +15,17 @@ typedef struct
 } app_network_config_t;
 
 /**
+ * @brief AP Mode Configuration (optional)
+ */
+typedef struct
+{
+    char *ssid;         /*!< AP SSID (NULL to disable AP) */
+    char *password;     /*!< AP Password (min 8 chars for WPA2) */
+    uint8_t channel;    /*!< AP Channel (0 = auto) */
+    uint8_t max_conn;   /*!< AP Max connections (default 4) */
+} app_network_ap_config_t;
+
+/**
  * @brief Initialize WiFi STA and start connection
  *
  * Dependencies:
@@ -29,6 +40,24 @@ typedef struct
  * @return ESP_OK Initialization successful, other values indicate failure
  */
 esp_err_t app_network_init(const app_network_config_t *config);
+
+/**
+ * @brief Initialize WiFi AP mode alongside STA
+ *
+ * Must be called after app_network_init(). Enables APSTA mode.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t app_network_start_ap(const app_network_ap_config_t *config);
+
+/**
+ * @brief Stop WiFi AP mode
+ *
+ * Switches back to STA-only mode.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t app_network_stop_ap(void);
 
 /**
  * @brief Deinitialize WiFi STA Network

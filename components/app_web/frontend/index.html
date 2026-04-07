@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Gateway</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header>
+        <h1>ESP32 IoT Gateway</h1>
+        <nav>
+            <a href="#dashboard" class="nav-link active" data-view="dashboard">Dashboard</a>
+            <a href="#settings" class="nav-link" data-view="settings">Settings</a>
+        </nav>
+    </header>
+
+    <main>
+        <!-- Dashboard View -->
+        <div id="view-dashboard" class="view active">
+            <!-- System Info -->
+            <section class="card">
+                <h2>System</h2>
+                <div class="grid-2">
+                    <div class="stat"><span class="label">Uptime</span><span id="sys-uptime" class="value">--</span></div>
+                    <div class="stat"><span class="label">Free Heap</span><span id="sys-heap" class="value">--</span></div>
+                    <div class="stat"><span class="label">WiFi</span><span id="sys-wifi" class="value">--</span></div>
+                    <div class="stat"><span class="label">RSSI</span><span id="sys-rssi" class="value">--</span></div>
+                    <div class="stat"><span class="label">MQTT</span><span id="sys-mqtt" class="value">--</span></div>
+                    <div class="stat"><span class="label">IP</span><span id="sys-ip" class="value">--</span></div>
+                    <div class="stat"><span class="label">Time</span><span id="sys-time" class="value">--</span></div>
+                    <div class="stat"><span class="label">MAC</span><span id="sys-mac" class="value">--</span></div>
+                </div>
+            </section>
+
+            <!-- Weather -->
+            <section class="card">
+                <h2>Weather</h2>
+                <div id="weather-section">
+                    <p class="empty">Weather data unavailable</p>
+                </div>
+            </section>
+
+            <!-- Nodes -->
+            <section class="card">
+                <h2>Nodes</h2>
+                <div id="nodes-list" class="nodes-grid">
+                    <p class="empty">No nodes registered</p>
+                </div>
+            </section>
+        </div>
+
+        <!-- Settings View -->
+        <div id="view-settings" class="view">
+            <section class="card" id="cfg-wifi">
+                <h2>WiFi</h2>
+                <form data-module="wifi">
+                    <div class="form-group"><label>SSID</label><input name="ssid" type="text"></div>
+                    <div class="form-group"><label>Password</label><input name="password" type="password"></div>
+                    <div class="form-group"><label>Max Retry</label><input name="max_retry" type="number" min="1" max="100"></div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Save</button>
+                        <button type="button" class="btn btn-reset" data-module="wifi">Reset Defaults</button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="card" id="cfg-mqtt">
+                <h2>MQTT</h2>
+                <form data-module="mqtt">
+                    <div class="form-group"><label>Broker URI</label><input name="broker_uri" type="text"></div>
+                    <div class="form-group"><label>Client ID</label><input name="client_id" type="text"></div>
+                    <div class="form-group"><label>Username</label><input name="username" type="text"></div>
+                    <div class="form-group"><label>Password</label><input name="password" type="password"></div>
+                    <div class="form-group"><label>Keepalive (s)</label><input name="keepalive" type="number" min="10" max="3600"></div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Save</button>
+                        <button type="button" class="btn btn-reset" data-module="mqtt">Reset Defaults</button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="card" id="cfg-espnow">
+                <h2>ESP-NOW</h2>
+                <form data-module="espnow">
+                    <div class="form-group"><label>PMK (16 chars)</label><input name="pmk" type="text" maxlength="16"></div>
+                    <div class="form-group"><label>Heartbeat Timeout (s)</label><input name="heartbeat_timeout_s" type="number" min="10" max="600"></div>
+                    <div class="form-group"><label>Heartbeat Check (s)</label><input name="heartbeat_check_s" type="number" min="5" max="120"></div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Save</button>
+                        <button type="button" class="btn btn-reset" data-module="espnow">Reset Defaults</button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="card" id="cfg-sntp">
+                <h2>SNTP</h2>
+                <form data-module="sntp">
+                    <div class="form-group"><label>NTP Server</label><input name="ntp_server" type="text"></div>
+                    <div class="form-group"><label>Timezone</label><input name="timezone" type="text"></div>
+                    <div class="form-group"><label>Sync Interval (min)</label><input name="sync_interval" type="number" min="1" max="1440"></div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Save</button>
+                        <button type="button" class="btn btn-reset" data-module="sntp">Reset Defaults</button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="card" id="cfg-weather">
+                <h2>Weather</h2>
+                <form data-module="weather">
+                    <div class="form-group"><label>API Key</label><input name="api_key" type="text"></div>
+                    <div class="form-group"><label>Location</label><input name="location" type="text"></div>
+                    <div class="form-group"><label>API Host</label><input name="api_host" type="text"></div>
+                    <div class="form-group"><label>Refresh Interval (min)</label><input name="refresh_min" type="number" min="10" max="1440"></div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Save</button>
+                        <button type="button" class="btn btn-reset" data-module="weather">Reset Defaults</button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="card" id="cfg-display">
+                <h2>Display</h2>
+                <form data-module="display">
+                    <div class="form-group"><label>Refresh Interval (s)</label><input name="refresh_interval_s" type="number" min="30" max="3600"></div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Save</button>
+                        <button type="button" class="btn btn-reset" data-module="display">Reset Defaults</button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="card">
+                <h2>System</h2>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-danger" id="btn-restart">Restart Device</button>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
