@@ -1,6 +1,6 @@
 set(srcs "app_web.c")
 
-# Frontend files to embed (gzip compressed)
+# Frontend files to embed (gzip compressed + assets)
 set(embed_files "")
 set(frontend_dir "${CMAKE_CURRENT_SOURCE_DIR}/frontend")
 
@@ -13,6 +13,11 @@ if(EXISTS "${frontend_dir}/style.css.gz")
 endif()
 if(EXISTS "${frontend_dir}/app.js.gz")
     list(APPEND embed_files "${frontend_dir}/app.js.gz")
+endif()
+
+# Check if font file exists
+if(EXISTS "${frontend_dir}/weathericons-regular-webfont.ttf")
+    list(APPEND embed_files "${frontend_dir}/weathericons-regular-webfont.ttf")
 endif()
 
 idf_component_register(

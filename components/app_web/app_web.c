@@ -48,6 +48,8 @@ extern const uint8_t style_css_gz_start[]  asm("_binary_style_css_gz_start");
 extern const uint8_t style_css_gz_end[]    asm("_binary_style_css_gz_end");
 extern const uint8_t app_js_gz_start[]     asm("_binary_app_js_gz_start");
 extern const uint8_t app_js_gz_end[]       asm("_binary_app_js_gz_end");
+extern const uint8_t weathericons_regular_webfont_ttf_start[] asm("_binary_weathericons_regular_webfont_ttf_start");
+extern const uint8_t weathericons_regular_webfont_ttf_end[]   asm("_binary_weathericons_regular_webfont_ttf_end");
 
 /* ───────────────────────── Sensor Data Cache ───────────────────────── */
 
@@ -238,6 +240,14 @@ static esp_err_t handle_app_js(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "max-age=3600");
     return httpd_resp_send(req, (const char *)app_js_gz_start,
                            app_js_gz_end - app_js_gz_start);
+}
+
+static esp_err_t handle_font(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "font/ttf");
+    httpd_resp_set_hdr(req, "Cache-Control", "max-age=86400");
+    return httpd_resp_send(req, (const char *)weathericons_regular_webfont_ttf_start,
+                           weathericons_regular_webfont_ttf_end - weathericons_regular_webfont_ttf_start);
 }
 
 /* ───────────────────────── Status API ───────────────────────── */
@@ -1150,6 +1160,9 @@ static void register_routes(httpd_handle_t server)
     httpd_uri_t uri_js = {
         .uri = "/app.js", .method = HTTP_GET, .handler = handle_app_js
     };
+    httpd_uri_t uri_font = {
+        .uri = "/weathericons.ttf", .method = HTTP_GET, .handler = handle_font
+    };
 
     /* ── CORS preflight (wildcard) ── */
     httpd_uri_t uri_options = {
@@ -1197,6 +1210,7 @@ static void register_routes(httpd_handle_t server)
     httpd_register_uri_handler(server, &uri_index);
     httpd_register_uri_handler(server, &uri_css);
     httpd_register_uri_handler(server, &uri_js);
+    httpd_register_uri_handler(server, &uri_font);
     httpd_register_uri_handler(server, &uri_options);
     httpd_register_uri_handler(server, &uri_status_system);
     httpd_register_uri_handler(server, &uri_status_nodes);
