@@ -211,7 +211,13 @@ static void app_event_handler(void *arg, esp_event_base_t event_base,
         esp_netif_ip_info_t *ip_info = (esp_netif_ip_info_t *)event_data;
         ESP_LOGI(TAG, "WiFi station got IP: " IPSTR, IP2STR(&ip_info->ip));
         app_sntp_start();
-        app_web_init();
+        /* Web server may already be running (started via AP mode).
+         * app_web_init() is idempotent — returns ESP_ERR_INVALID_STATE
+         * if already running, which is expected and safe to ignore. */
+        esp_err_t web_err = app_web_init();
+        if (web_err != ESP_OK && web_err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Web server start failed: %s", esp_err_to_name(web_err));
+        }
         break;
     }
 
