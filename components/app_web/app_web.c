@@ -1236,9 +1236,6 @@ esp_err_t app_web_init(void)
     s_start_time_us = esp_timer_get_time();
     memset(s_sensor_cache, 0, sizeof(s_sensor_cache));
 
-    /* Register event handler for sensor data */
-    app_event_handler_register(APP_EVENT_ESPNOW_NODE_DATA, web_event_handler, NULL);
-
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CONFIG_WEB_SERVER_PORT;
     config.max_open_sockets = CONFIG_WEB_SERVER_MAX_CONN;
@@ -1253,6 +1250,9 @@ esp_err_t app_web_init(void)
         return err;
     }
 
+    /* Register event handler only after server is successfully started */
+    app_event_handler_register(APP_EVENT_ESPNOW_NODE_DATA, web_event_handler, NULL);
+
     httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, handle_404);
     register_routes(s_server);
 
@@ -1265,6 +1265,9 @@ esp_err_t app_web_stop(void)
     if (!s_server) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* Unregister event handler before stopping the server */
+    app_event_handler_unregister(APP_EVENT_ESPNOW_NODE_DATA, web_event_handler);
 
     esp_err_t err = httpd_stop(s_server);
     s_server = NULL;
