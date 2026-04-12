@@ -556,6 +556,14 @@ esp_err_t app_network_start_ap(const app_network_ap_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* Reject password that is provided but too short for WPA2 */
+    if (config->password && strlen(config->password) > 0 &&
+        strlen(config->password) < WPA2_PASSWORD_MIN_LEN) {
+        ESP_LOGE(TAG, "AP password too short for WPA2 (min %d chars), "
+                 "use NULL or empty string for open AP", WPA2_PASSWORD_MIN_LEN);
+        return ESP_ERR_INVALID_ARG;
+    }
+
     if (s_ap_active) {
         ESP_LOGW(TAG, "AP already active");
         return ESP_OK;
@@ -582,13 +590,18 @@ esp_err_t app_network_start_ap(const app_network_ap_config_t *config)
     memset(&ap_config, 0, sizeof(ap_config));
     strncpy((char *)ap_config.ap.ssid, config->ssid, sizeof(ap_config.ap.ssid) - 1);
     ap_config.ap.ssid_len = strlen(config->ssid);
-    ap_config.ap.channel = config->channel > 0 ? config->channel : 1;
+    /*
+     * Channel 0 = follow STA home channel (official doc: in APSTA mode
+     * the SoftAP channel is forced to match the STA channel).
+     * Only set an explicit channel when the caller really knows it.
+     */
+    ap_config.ap.channel = config->channel;
     ap_config.ap.max_connection = config->max_conn > 0 ? config->max_conn : 4;
 
     if (config->password && strlen(config->password) >= WPA2_PASSWORD_MIN_LEN) {
         strncpy((char *)ap_config.ap.password, config->password, sizeof(ap_config.ap.password) - 1);
         ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    } else {
+    } else if (config->password == NULL || strlen(config->password) == 0) {
         ap_config.ap.authmode = WIFI_AUTH_OPEN;
     }
     ap_config.ap.pmf_cfg.required = false;
